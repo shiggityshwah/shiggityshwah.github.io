@@ -90,7 +90,7 @@
         <div>Movement Speed: <span id="stat-move-speed">0.50</span></div>
         <div>Damage: <span id="stat-damage">30</span></div>
         <div>Luck: <span id="stat-luck">50%</span></div>
-        <div>Vacuum Distance: <span id="stat-vacuum-distance">0</span></div>
+        <div>Vacuum Distance: <span id="stat-vacuum-distance">15</span></div>
     </div>
     <div id="health-bar-container">
         <div id="health-bar"></div>
@@ -112,8 +112,6 @@
 
         // Camera
         const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-        camera.position.set(60, 80, 80);
-        camera.lookAt(0, 0, 0);
 
         // Renderer
         const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -122,7 +120,7 @@
         document.body.appendChild(renderer.domElement);
 
         // Ground Plane
-        const planeGeometry = new THREE.PlaneGeometry(500, 500);
+        const planeGeometry = new THREE.PlaneGeometry(1000, 1000);
         const planeMaterial = new THREE.MeshStandardMaterial({ color: 0xC2B280, side: THREE.DoubleSide, metalness: 0.2, roughness: 0.8 });
         const plane = new THREE.Mesh(planeGeometry, planeMaterial);
         plane.rotation.x = -Math.PI / 2;
@@ -134,11 +132,25 @@
         const octahedronGeometry = new THREE.OctahedronGeometry(12);
 
         function spawnOctahedrons() {
-            for (let i = 0; i < 2; i++) {
+            const minDistance = 100;
+            for (let i = 0; i < 8; i++) {
+                let position;
+                let tooClose;
+                do {
+                    tooClose = false;
+                    position = new THREE.Vector3((Math.random() - 0.5) * 480, 60, (Math.random() - 0.5) * 480);
+                    for (const group of octahedronGroups) {
+                        if (position.distanceTo(group.octahedron.position) < minDistance) {
+                            tooClose = true;
+                            break;
+                        }
+                    }
+                } while (tooClose);
+
                 const octahedronMaterialInstance = new THREE.MeshStandardMaterial({ color: 0x9932CC, flatShading: true, emissive: 0x9932CC, emissiveIntensity: 0.5 });
                 const octahedron = new THREE.Mesh(octahedronGeometry, octahedronMaterialInstance);
                 const initialY = 60;
-                octahedron.position.set((Math.random() - 0.5) * 480, initialY, (Math.random() - 0.5) * 480);
+                octahedron.position.copy(position);
                 octahedron.castShadow = false;
                 scene.add(octahedron);
 
@@ -333,6 +345,40 @@ window.addEventListener('touchend', (event) => {
     endDrag();
 });
 
+let initialPinchDistance = 0;
+
+renderer.domElement.addEventListener('touchstart', (event) => {
+    if (event.touches.length === 2) {
+        initialPinchDistance = Math.hypot(
+            event.touches[0].pageX - event.touches[1].pageX,
+            event.touches[0].pageY - event.touches[1].pageY
+        );
+    }
+});
+
+renderer.domElement.addEventListener('touchmove', (event) => {
+    if (event.touches.length === 2) {
+        const currentPinchDistance = Math.hypot(
+            event.touches[0].pageX - event.touches[1].pageX,
+            event.touches[0].pageY - event.touches[1].pageY
+        );
+
+        const zoomFactor = currentPinchDistance / initialPinchDistance;
+        cameraOffset.multiplyScalar(1 / zoomFactor);
+
+        const minZoom = 20;
+        const maxZoom = 400;
+        if (cameraOffset.length() < minZoom) {
+            cameraOffset.setLength(minZoom);
+        }
+        if (cameraOffset.length() > maxZoom) {
+            cameraOffset.setLength(maxZoom);
+        }
+
+        initialPinchDistance = currentPinchDistance;
+    }
+});
+
 
         // Prevent context menu on right click
 renderer.domElement.addEventListener('contextmenu', (event) => {
@@ -367,7 +413,7 @@ function updateConePosition() {
 }
 
 
-        const cameraOffset = new THREE.Vector3(0, 60, 20);
+        const cameraOffset = new THREE.Vector3(0, 200, 80);
         
         window.addEventListener('wheel', (event) => {
             const zoomFactor = 1.1;
@@ -377,7 +423,7 @@ function updateConePosition() {
                 cameraOffset.multiplyScalar(zoomFactor);
             }
             const minZoom = 20;
-            const maxZoom = 200;
+            const maxZoom = 400;
             if (cameraOffset.length() < minZoom) {
                 cameraOffset.setLength(minZoom);
             }
@@ -530,7 +576,7 @@ function updateConePosition() {
         }
 
         let luck = 0.5;
-        let vacuumRadius = 0;
+        let vacuumRadius = 15;
         let pickupDistance = 5;
         let animationId;
 
@@ -984,7 +1030,7 @@ function updateConePosition() {
             coneSpeed = 0.5;
             blasterDamage = 30;
             luck = 0.5;
-            vacuumRadius = 0;
+            vacuumRadius = 15;
             pickupDistance = 5;
 
             document.getElementById('stat-attack-speed').textContent = (1/shotCooldown).toFixed(2);
