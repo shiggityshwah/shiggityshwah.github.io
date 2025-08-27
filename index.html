@@ -755,8 +755,8 @@ function updateConePosition() {
                     const direction = new THREE.Vector3().subVectors(clickedPoint, origin).normalize();
                     const extendedTargetPoint = new THREE.Vector3().copy(origin).addScaledVector(direction, 1000);
 
-                    const blasterGeometry = new THREE.SphereGeometry(1, 8, 8);
-                    const blasterMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000, emissive: 0xff0000, emissiveIntensity: 2 });
+                                        const blasterGeometry = new THREE.SphereGeometry(1.5, 8, 8);
+                                        const blasterMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000, emissive: 0xff0000, emissiveIntensity: 5 });
                     const blaster = new THREE.Mesh(blasterGeometry, blasterMaterial);
                     blaster.position.copy(playerCone.position);
                     scene.add(blaster);
