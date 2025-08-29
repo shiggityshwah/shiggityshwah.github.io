@@ -816,6 +816,7 @@
               const BASE_PLAYER_RADIUS = 1.5;
               const BASE_ENEMY_PROJECTILE_SPEED = 2.0;
               const BASE_OCTAHEDRON_COOLDOWN = 2.5;
+              const MAX_OCTAHEDRONS = 8;
 
               let maxEnemies = INITIAL_ENEMY_COUNT;
               let animationId;
@@ -1250,8 +1251,8 @@
                   const currentTime = clock.getElapsedTime();
                   if (currentTime - lastOctahedronSpawnTime > octahedronSpawnInterval) {
                       lastOctahedronSpawnTime = currentTime;
-                      const activeOctahedrons = octahedronGroups.filter(group => group.state !== 'idle' && group.state !== 'returning').length;
-                      const spawnChance = Math.max(0, (20 - activeOctahedrons) / 20);
+                      const totalOctahedrons = octahedronGroups.length;
+                      const spawnChance = Math.max(0, (MAX_OCTAHEDRONS - totalOctahedrons) / MAX_OCTAHEDRONS);
                       if (Math.random() < spawnChance) {
                           spawnOctahedrons(1, false);
                       }
@@ -1933,6 +1934,7 @@
                   updateStatsUI();
 
                   lastShotTime = 0;
+                  lastOctahedronSpawnTime = 0;
                   maxEnemies = INITIAL_ENEMY_COUNT;
 
                   playerHealth = playerStats.maxHealth;
