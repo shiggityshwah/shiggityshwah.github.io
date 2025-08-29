@@ -816,6 +816,10 @@
               const BASE_PLAYER_RADIUS = 1.5;
               const BASE_ENEMY_PROJECTILE_SPEED = 2.0;
               const BASE_OCTAHEDRON_COOLDOWN = 2.5;
+              const MAX_ENEMIES_TOTAL = 20;
+              const MAX_BOSSES = 3;
+              const MIN_BOX_RATIO = 0.6;
+
               const MAX_OCTAHEDRONS = 8;
 
               let maxEnemies = INITIAL_ENEMY_COUNT;
@@ -828,6 +832,10 @@
                   vacuum: 0,
                   crit: 0
               };
+              let enemyCounts = {};
+              let bossCount = 0;
+              let lastBossSpawnScore = 0;
+
 
 
               function playSound(url, volume = 1.0) {
@@ -867,76 +875,149 @@
                   vacuum: { color: 0x0000ff, geometry: new THREE.CylinderGeometry(2, 2, 3, 8) },
                   crit: { color: 0xffff00, geometry: new THREE.TorusGeometry(2, 0.5, 8, 16) }
               };
+              
+              const enemyPrototypes = {
+                  box: {
+                      geometry: (size) => new THREE.BoxGeometry(size, size, size),
+                      getMaterial: () => new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(0.1 + Math.random() * 0.8, 1, 0.5) }),
+                      baseHealth: 30, healthRand: 40, healthLevelScale: 10,
+                      baseSpeed: 0.2, speedLevelScale: 0.02,
+                      contactDamage: 10,
+                  },
+                  shooter: {
+                      geometry: () => shooterGeometry, material: shooterMaterial,
+                      baseHealth: 20, healthRand: 20, healthLevelScale: 5,
+                      baseSpeed: 0.1, speedLevelScale: 0.01,
+                      contactDamage: 10,
+                  },
+                  tank: {
+                      geometry: () => new THREE.BoxGeometry(25, 25, 25), material: new THREE.MeshStandardMaterial({ color: 0xff4500 }),
+                      baseHealth: 120, healthRand: 80, healthLevelScale: 30,
+                      baseSpeed: 0.1, speedLevelScale: 0.01,
+                      contactDamage: 25,
+                      specialDrop: { type: 'damage', chance: 0.5 }
+                  },
+                  berserker: {
+                      geometry: () => new THREE.DodecahedronGeometry(6), material: new THREE.MeshStandardMaterial({ color: 0x32cd32 }),
+                      baseHealth: 1, healthRand: 0, healthLevelScale: 0,
+                      baseSpeed: 0.4, speedLevelScale: 0.04,
+                      contactDamage: 5,
+                      specialDrop: { type: 'speed', chance: 0.5 }
+                  },
+                  magnetic: {
+                      geometry: () => new THREE.TorusGeometry(8, 3, 8, 16), material: new THREE.MeshStandardMaterial({ color: 0x4169e1 }),
+                      baseHealth: 40, healthRand: 20, healthLevelScale: 8,
+                      baseSpeed: 0.15, speedLevelScale: 0.015,
+                      contactDamage: 10,
+                      specialDrop: { type: 'vacuum', chance: 0.5 }
+                  },
+                  elite: {
+                      geometry: () => new THREE.IcosahedronGeometry(12), material: new THREE.MeshStandardMaterial({ color: 0xffd700, emissive: 0xffd700, emissiveIntensity: 0.5 }),
+                      baseHealth: 250, healthRand: 50, healthLevelScale: 20,
+                      baseSpeed: 0.18, speedLevelScale: 0.01,
+                      contactDamage: 15,
+                      specialDrop: { type: 'crit', chance: 0.5 }
+                  },
+                  phantom: {
+                      geometry: () => new THREE.OctahedronGeometry(10), material: new THREE.MeshStandardMaterial({ color: 0xf0f8ff, transparent: true, opacity: 0.4 }),
+                      baseHealth: 1, healthRand: 0, healthLevelScale: 0, // Takes 1 hit when vulnerable
+                      baseSpeed: 0.2, speedLevelScale: 0.02,
+                      contactDamage: 10,
+                      specialDrop: { type: 'luck', chance: 0.5 }
+                  }
+              };
 
-              function spawnEnemy() {
-                  const shooterSpawnChance = level > 1 ? Math.min(0.5, score / 1000) : 0;
-                  const enemyType = Math.random() < shooterSpawnChance ? 'shooter' : 'box';
+              function spawnSpecificEnemy(type, isBoss = false) {
+                  const proto = enemyPrototypes[type];
+                  if (!proto) return;
 
-                  if (enemyType === 'box') {
-                      const health = 30 + Math.random() * 40 + (level * 10);
-                      const maxHealth = health;
+                  const health = (isBoss ? proto.baseHealth * 5 : proto.baseHealth + Math.random() * proto.healthRand + (level * proto.healthLevelScale));
+                  const baseSpeed = proto.baseSpeed + level * proto.speedLevelScale;
+                  const speed = baseSpeed * gameSpeedMultiplier;
+                  const scale = isBoss ? 2 : 1;
 
-                      const enemyBaseSpeed = 0.2 + level * 0.02;
-                      const speedRandomness = (Math.random() - 0.5) * 0.3;
-                      const finalBaseSpeed = enemyBaseSpeed + speedRandomness;
-                      const speed = finalBaseSpeed * gameSpeedMultiplier;
-                      const baseSize = 10;
-                      const size = baseSize - speedRandomness * 20;
+                  let enemyMesh;
+                  if (proto.material) {
+                      enemyMesh = new THREE.Mesh(proto.geometry(), proto.material.clone());                  
+                  } else {
+                      const material = proto.getMaterial();
+                      enemyMesh = new THREE.Mesh(proto.geometry(10 * scale), material);
+                  }
+                  enemyMesh.scale.set(scale, scale, scale);
 
-                      const enemyGeometry = new THREE.BoxGeometry(size, size, size);
+                  let x, z;
+                  do {
+                      x = (Math.random() - 0.5) * 980;
+                      z = (Math.random() - 0.5) * 980;
+                  } while (new THREE.Vector3(x, 5, z).distanceTo(playerCone.position) < 150);
+                  enemyMesh.position.set(x, 5 * scale, z);
 
-                      const hue = 0.1 + Math.random() * 0.8;
-                      const initialColor = new THREE.Color().setHSL(hue, 1, 0.5);
-                      const enemyMaterialInstance = new THREE.MeshStandardMaterial({ color: initialColor });
-                      const enemyMesh = new THREE.Mesh(enemyGeometry, enemyMaterialInstance);
-                      let x, z;
-                      do {
-                          x = (Math.random() - 0.5) * 980;
-                          z = (Math.random() - 0.5) * 980;
-                      } while (new THREE.Vector3(x, 5, z).distanceTo(playerCone.position) < 100);
-                      enemyMesh.position.set(x, 5, z);
+                  const enemyData = {
+                      mesh: enemyMesh,
+                      speed: speed,
+                      baseSpeed: baseSpeed,
+                      health: health,
+                      maxHealth: health,
+                      type: type,
+                      radius: (type === 'tank' ? 12.5 : 8) * scale,
+                      contactDamage: proto.contactDamage * (isBoss ? 2 : 1),
+                      isBoss: isBoss,
+                      specialDrop: proto.specialDrop
+                  };
 
-                      const wireframeGeometry = new THREE.WireframeGeometry(enemyGeometry);
-                      const wireframeMaterial = new THREE.LineBasicMaterial({ color: initialColor });
+                  if (type === 'box') {
+                      const wireframeGeometry = new THREE.WireframeGeometry(enemyMesh.geometry);
+                      const wireframeMaterial = new THREE.LineBasicMaterial({ color: enemyMesh.material.color });
                       const wireframe = new THREE.LineSegments(wireframeGeometry, wireframeMaterial);
                       enemyMesh.add(wireframe);
+                      enemyData.wireframe = wireframe;
+                      enemyData.initialColor = enemyMesh.material.color.clone();
+                  }
 
-                      scene.add(enemyMesh);
-                      enemies.push({
-                          mesh: enemyMesh,
-                          speed: speed,
-                          baseSpeed: finalBaseSpeed,
-                          health: health,
-                          maxHealth: maxHealth,
-                          wireframe: wireframe,
-                          type: 'box',
-                          radius: size / 2,
-                          initialColor: initialColor.clone()
-                      });
+                  if (type === 'shooter' || type === 'elite') enemyData.lastShotTime = 0;
+                  if (type === 'phantom') {
+                      enemyData.teleportCount = 0;
+                      enemyData.teleportsBeforeVulnerable = 3;
+                      enemyData.isVulnerable = false;
+                  }
+
+                  scene.add(enemyMesh);
+                  enemies.push(enemyData);
+                  enemyCounts[type] = (enemyCounts[type] || 0) + 1;
+                  if (isBoss) bossCount++;
+              }
+
+              function spawnBoss() {
+                  if (bossCount >= MAX_BOSSES) return;
+                  const bossTypes = ['tank', 'elite', 'magnetic', 'phantom'];
+                  const randomBossType = bossTypes[Math.floor(Math.random() * bossTypes.length)];
+                  spawnSpecificEnemy(randomBossType, true);
+              }
+
+              const spawnWeights = { shooter: 20, tank: 15, berserker: 12, magnetic: 8, elite: 5, phantom: 3 };
+              const totalSpawnWeight = Object.values(spawnWeights).reduce((s, a) => s + a, 0);
+
+              function getWeightedRandomEnemyType() {
+                  let rand = Math.random() * totalSpawnWeight;
+                  for (const type in spawnWeights) {
+                      if (rand < spawnWeights[type]) return type;
+                      rand -= spawnWeights[type];
+                  }
+                  return 'shooter'; // Fallback
+              }
+
+              function spawnEnemy() {
+                  const nonBossSlots = MAX_ENEMIES_TOTAL - MAX_BOSSES;
+                  const currentNonBossCount = enemies.length - bossCount;
+
+                  if (currentNonBossCount >= nonBossSlots) return;
+
+                  const boxCount = enemyCounts['box'] || 0;
+                  if (boxCount / nonBossSlots < MIN_BOX_RATIO) {
+                      spawnSpecificEnemy('box');
                   } else {
-                      const health = 20 + Math.random() * 20 + (level * 5);
-                      const maxHealth = health;
-                      const baseSpeed = 0.1 + level * 0.01;
-                      const speed = baseSpeed * gameSpeedMultiplier;
-                      const enemyMesh = new THREE.Mesh(shooterGeometry, shooterMaterial);
-                      let x, z;
-                      do {
-                          x = (Math.random() - 0.5) * 480;
-                          z = (Math.random() - 0.5) * 480;
-                      } while (new THREE.Vector3(x, 5, z).distanceTo(playerCone.position) < 150);
-                      enemyMesh.position.set(x, 5, z);
-
-                      scene.add(enemyMesh);
-                      enemies.push({
-                         mesh: enemyMesh,
-                          speed: speed,
-                          baseSpeed: baseSpeed,
-                          health: health,
-                          maxHealth: maxHealth,
-                          type: 'shooter',
-                          lastShotTime: 0,
-                          radius: 8
-                      });
+                      const typeToSpawn = getWeightedRandomEnemyType();
+                      spawnSpecificEnemy(typeToSpawn);
                   }
               }
 
@@ -946,41 +1027,59 @@
                }
 
               function handleEnemyDeath(enemy) {
-                  let skeletonGeometry;
-                  if (enemy.type === 'box') {
-                      const size = enemy.mesh.geometry.parameters.width;
-                      skeletonGeometry = new THREE.BoxGeometry(size, size, size);
-                  } else {
-                      skeletonGeometry = new THREE.TetrahedronGeometry(8);
-                  }
+                  // --- Add Skeleton ---
+                  const skeletonGeometry = enemy.mesh.geometry; // No need to clone for wireframe
                   const skeletonMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true });
                   const skeleton = new THREE.Mesh(skeletonGeometry, skeletonMaterial);
                   skeleton.position.copy(enemy.mesh.position);
                   skeleton.quaternion.copy(enemy.mesh.quaternion);
+                  skeleton.scale.copy(enemy.mesh.scale); // Important for bosses
                   scene.add(skeleton);
                   skeletons.push({mesh: skeleton, createdAt: Date.now()});
+                  enemyCounts[enemy.type]--;
+                  if (enemy.isBoss) {
+                      bossCount--;
+                      experience += 15; // 3x normal 5 gold
+                      const gemDropCount = 2 + Math.floor(Math.random() * 4); // 2-5 gems
+                      for (let i = 0; i < gemDropCount; i++) {
+                          gemCounts[enemy.specialDrop.type]++;
+                          document.getElementById(`gem-${enemy.specialDrop.type}`).textContent = gemCounts[enemy.specialDrop.type];
+                      }
+                  } else {
+                      // Normal enemy death
+                      let didSpecialDrop = false;
+                      if (enemy.specialDrop) {
+                          const dropChance = enemy.specialDrop.chance * (1 + (playerStats.luck - 0.5));
+                          if (Math.random() < dropChance) {
+                              gemCounts[enemy.specialDrop.type]++;
+                              document.getElementById(`gem-${enemy.specialDrop.type}`).textContent = gemCounts[enemy.specialDrop.type];
+                              didSpecialDrop = true;
+                          }
+                      }
+
+                      if (!didSpecialDrop) {
+                          if (Math.random() < 0.1) { // Gem drop
+                              const gemTypesArray = Object.keys(gemTypes);
+                              const randomGemType = gemTypesArray[Math.floor(Math.random() * gemTypesArray.length)];
+                              gemCounts[randomGemType]++;
+                              document.getElementById(`gem-${randomGemType}`).textContent = gemCounts[randomGemType];
+                          } else if (Math.random() < playerStats.luck) { // Coin drop
+                              experience += Math.floor(Math.random() * 5) + 1;
+                          }
+                      }
+                  }
 
                   score++;
                   scoreElement.textContent = score;
+                  updateExperienceBar();
+                  if (experience >= experienceToNextLevel) {
+                      levelUp();
+                  }
 
-                  if (Math.random() < 0.1) { // Gem drop
-                      const gemTypesArray = Object.keys(gemTypes);
-                      const randomGemType = gemTypesArray[Math.floor(Math.random() * gemTypesArray.length)];
-                      const gemInfo = gemTypes[randomGemType];
-                      const gemMaterial = new THREE.MeshStandardMaterial({ color: gemInfo.color, flatShading: true });
-                      const gem = new THREE.Mesh(gemInfo.geometry, gemMaterial);
-                      gem.position.copy(enemy.mesh.position);
-                      gem.position.y = 2;
-                      scene.add(gem);
-                      gems.push({ mesh: gem, type: randomGemType });
-                  } else if (Math.random() < playerStats.luck) { // Coin drop
-                      const goldAmount = Math.floor(Math.random() * 5) + 1;
-                      const coin = new THREE.Sprite(coinSpriteMaterial);
-                      coin.scale.set(3, 3, 1);
-                      coin.position.copy(enemy.mesh.position);
-                      coin.position.y = 2;
-                      scene.add(coin);
-                      coins.push({ mesh: coin, gold: goldAmount });
+                  // Boss spawn check
+                  if (score > 0 && score % 100 === 0 && score !== lastBossSpawnScore) {
+                      lastBossSpawnScore = score;
+                      spawnBoss();
                   }
 
                   scoreElement.classList.add('score-animated');
@@ -1065,10 +1164,6 @@
                       const distance = playerCone.position.distanceTo(coin.mesh.position);
                       if (distance < 5) { // pickupDistance is 5
                           experience += coin.gold;
-                          updateExperienceBar();
-                          if (experience >= experienceToNextLevel) {
-                              levelUp();
-                          }
                           scene.remove(coin.mesh);
                           coins.splice(i, 1);
                           playSound('https://www.soundjay.com/misc/sounds/coin-01.wav', 0.5);                      } else if (distance < playerStats.coinPickupRadius) {
@@ -1095,11 +1190,27 @@
                   // Update enemy positions
                   for (let i = enemies.length - 1; i >= 0; i--) {
                       const enemy = enemies[i];
-                      if (enemy.type === 'box') {
+
+                      if (enemy.type === 'phantom' && enemy.isVulnerable && clock.getElapsedTime() > enemy.vulnerableUntil) {
+                          enemy.isVulnerable = false;
+                          enemy.teleportCount = 0;
+                          enemy.mesh.material.emissive.set(0x000000);
+                      }
+
+                      if (enemy.type === 'magnetic') {
+                          const pullRange = 50;
+                          const pullStrength = 0.5;
+                          if (enemy.mesh.position.distanceTo(playerCone.position) < pullRange) {
+                              const pullDirection = new THREE.Vector3().subVectors(enemy.mesh.position, playerCone.position).normalize();
+                              playerCone.position.addScaledVector(pullDirection, pullStrength);
+                          }
+                      }
+
+                      if (enemy.type !== 'shooter' && enemy.type !== 'elite') {
                           enemy.mesh.lookAt(playerCone.position);
                           const direction = new THREE.Vector3().subVectors(playerCone.position, enemy.mesh.position).normalize();
                           enemy.mesh.position.addScaledVector(direction, enemy.speed);
-                      } else if (enemy.type === 'shooter') {
+                      } else { // Shooter and Elite logic
                           const distanceToPlayer = enemy.mesh.position.distanceTo(playerCone.position);
                           const desiredDistanceMin = 120;
                           const desiredDistanceMax = 180;
@@ -1125,7 +1236,7 @@
 
                           // Shoot at the closest target (player or active octahedron)
                           const maxRange = 180;
-                          const currentTime = clock.getElapsedTime();
+                          const currentTime = clock.getElapsedTime();                          const shootCooldown = enemy.type === 'elite' ? 3 : 2;
                           if (currentTime - enemy.lastShotTime > 2) { // 2-second cooldown
                               let targetPosition = null;
                               let minDistance = maxRange;
@@ -1150,11 +1261,25 @@
                               // If a target was found, shoot
                               if (targetPosition) {
                                   enemy.lastShotTime = currentTime;
-                                  const projectile = new THREE.Mesh(enemyProjectileGeometry, enemyProjectileMaterial);
-                                  projectile.position.copy(enemy.mesh.position);
-                                  const direction = new THREE.Vector3().subVectors(targetPosition, enemy.mesh.position).normalize();
-                                  enemyProjectiles.push({ mesh: projectile, direction: direction, range: maxRange + 50, distanceTraveled: 0 });
-                                  scene.add(projectile);
+                                  const baseDirection = new THREE.Vector3().subVectors(targetPosition, enemy.mesh.position).normalize();
+
+                                  const spawnProjectile = (dir) => {
+                                      const projectile = new THREE.Mesh(enemyProjectileGeometry, enemyProjectileMaterial);
+                                      projectile.position.copy(enemy.mesh.position);
+                                      enemyProjectiles.push({ mesh: projectile, direction: dir, range: maxRange + 50, distanceTraveled: 0 });
+                                      scene.add(projectile);
+                                  };
+
+                                  if (enemy.type === 'elite') {
+                                      const spreadAngle = Math.PI / 12; // 15 degrees
+                                      spawnProjectile(baseDirection);
+                                      const leftDirection = baseDirection.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), spreadAngle);
+                                      spawnProjectile(leftDirection);
+                                      const rightDirection = baseDirection.clone().applyAxisAngle(new THREE.Vector3(0, 1, 0), -spreadAngle);
+                                      spawnProjectile(rightDirection);
+                                  } else {
+                                      spawnProjectile(baseDirection);
+                                  }
                               }
                           }
                       }
@@ -1307,7 +1432,7 @@
                               // DODGE!
                               playSound('https://www.soundjay.com/misc/sounds/hit-01.wav', 0.2);
                           } else {
-                              const damageTaken = 10 * (50 / (50 + playerStats.armor));
+                              const damageTaken = enemy.contactDamage * (50 / (50 + playerStats.armor));
                               playerHealth -= damageTaken;
                               healthBarElement.style.width = (playerHealth / playerStats.maxHealth) * 100 + '%';
                               isPlayerHit = true;
@@ -1336,6 +1461,22 @@
                       for (let j = enemies.length - 1; j >= 0; j--) {
                           const enemy = enemies[j];
                           if (shot.blaster.position.distanceTo(enemy.mesh.position) < (shot.blaster.geometry.parameters.radius + enemy.radius) && !shot.hitEnemies.includes(enemy)) {
+                              if (enemy.type === 'phantom' && !enemy.isVulnerable) {
+                                  enemy.teleportCount++;
+                                  if (enemy.teleportCount >= enemy.teleportsBeforeVulnerable) {
+                                      enemy.isVulnerable = true;
+                                      enemy.vulnerableUntil = clock.getElapsedTime() + 2.0;
+                                      enemy.mesh.material.emissive.set(0xffffff);
+                                      enemy.mesh.material.emissiveIntensity = 2;
+                                  } else {
+                                      const angle = Math.random() * Math.PI * 2;
+                                      const distance = 50 + Math.random() * 50;
+                                      enemy.mesh.position.x += Math.cos(angle) * distance;
+                                      enemy.mesh.position.z += Math.sin(angle) * distance;
+                                  }
+                                  playSound('https://www.soundjay.com/misc/sounds/wind-chime-01.wav', 0.6);
+                                  shot.pierceLeft = 0; // Consume shot
+                              } else {
                               shot.pierceLeft--;
                               shot.hitEnemies.push(enemy);
 
@@ -1373,6 +1514,7 @@
                                       }
                                   }, 100);
                                   playSound('https://www.soundjay.com/misc/sounds/hit-01.wav', 0.3);
+                              }
                               }
 
                               if (shot.pierceLeft <= 0) {
@@ -1688,15 +1830,15 @@
               }
 
               const statUpgradePool = {
-                  common: ['damage', 'attackSpeed', 'maxHealth', 'critChance', 'regenRate', 'armor', 'pierceCount', 'areaDamageRadius', 'luck', 'dodgeChance', 'pickupRadius', 'cooldownReduction'],
+                  common: ['damage', 'attackSpeed', 'maxHealth', 'critChance', 'regenRate', 'armor', 'pierceCount', 'areaDamageRadius', 'luck', 'dodgeChance', 'pickupRadius', 'cooldownReduction']
               };
 
               const qualityTiers = {
-                  common: { color: '#9e9e9e', glow: 'rgba(158, 158, 158, 0.5)' },
-                  uncommon: { color: '#4caf50', glow: 'rgba(76, 175, 80, 0.7)' },
-                  rare: { color: '#2196f3', glow: 'rgba(33, 150, 243, 0.8)' },
-                  epic: { color: '#9c27b0', glow: 'rgba(156, 39, 176, 0.9)' },
-                  legendary: { color: '#ffc107', glow: 'rgba(255, 193, 7, 1)' },
+                  common:   { color: '#9e9e9e', boxShadow: 'none' },
+                  uncommon: { color: '#4caf50', boxShadow: 'none' },
+                  rare:     { color: '#2196f3', boxShadow: '0 0 12px rgba(33, 150, 243, 0.7)' },
+                  epic:     { color: '#9c27b0', boxShadow: '0 0 18px rgba(156, 39, 176, 0.9), 0 0 8px rgba(156, 39, 176, 0.9)' },
+                  legendary:{ color: '#ffc107', boxShadow: '0 0 25px rgba(255, 193, 7, 1), 0 0 12px rgba(255, 193, 7, 1)' }
               };
 
               function getQuality(normalizedValue) {
@@ -1826,7 +1968,7 @@
                       button.className = 'upgrade-button';
                       const qualityInfo = qualityTiers[option.quality];
                       button.style.backgroundColor = qualityInfo.color;
-                      button.style.boxShadow = `0 0 15px ${qualityInfo.glow}, 0 0 25px ${qualityInfo.glow}`;
+                      button.style.boxShadow = qualityInfo.boxShadow;
 
                       button.innerHTML = `<span class="stat-name">${option.stat.toUpperCase()}</span><span class="stat-value">${option.text}</span>`;
                       
@@ -1904,6 +2046,12 @@
                   playerScaleMultiplier = 1.0;
                   playerCone.scale.set(1, 1, 1);
                   playerStats.playerRadius = BASE_PLAYER_RADIUS;
+
+                  enemyCounts = {};
+                  Object.keys(enemyPrototypes).forEach(type => enemyCounts[type] = 0);
+                  bossCount = 0;
+                  lastBossSpawnScore = 0;
+
 
 
                   gemCounts = { damage: 0, speed: 0, attackSpeed: 0, luck: 0, vacuum: 0, crit: 0 };
