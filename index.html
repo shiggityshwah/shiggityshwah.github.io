@@ -223,6 +223,17 @@
       .gem-counter {
         text-shadow: 0 0 5px black, 0 0 8px black;
       }
+
+      #debug-info {
+        position: absolute;
+        top: 150px;
+        left: 20px;
+        color: white;
+        font-family: monospace;
+        background: rgba(0,0,0,0.5);
+        padding: 5px;
+        display: none; /* Set to 'block' to enable */
+      }
     </style>
   </head>
   <body>
@@ -248,6 +259,7 @@
       <span id="gem-vacuum" class="gem-counter" style="color: #0000ff;">0</span>
       <span id="gem-crit" class="gem-counter" style="color: #ffff00;">0</span>
     </div>
+    <div id="debug-info"></div>
     <div
       id="experience-bar-container"
       style="
@@ -353,6 +365,374 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script>
               console.log("Script started");
+              
+              const LogBuffer = {
+                  buffer: [],
+                  maxSize: 20, // Store last 20 messages
+                  originalWarn: console.warn,
+                  originalError: console.error,
+                  init() {
+                      console.warn = (...args) => {
+                          this.push('WARN', ...args);
+                          this.originalWarn.apply(console, args);
+                      };
+                      console.error = (...args) => {
+                          this.push('ERROR', ...args);
+                          this.originalError.apply(console, args);
+                      };
+                  },
+                  push(level, ...args) {
+                      const message = args.map(arg => {
+                          if (arg instanceof Error) {
+                              return arg.stack || arg.message;
+                          }
+                          if (typeof arg === 'object' && arg !== null) {
+                              try {
+                                  return JSON.stringify(arg);
+                              } catch (e) {
+                                  return '[Unserializable Object]';
+                              }
+                          }
+                          return String(arg);
+                      }).join(' ');
+                      this.buffer.push(`[${level}] ${new Date().toLocaleTimeString()}: ${message}`);
+                      if (this.buffer.length > this.maxSize) {
+                          this.buffer.shift();
+                      }
+                  },
+                  dump() {
+                      if (this.buffer.length > 0) {
+                          this.originalError("\n--- Recent Log Buffer (Warnings/Errors) ---");
+                          this.buffer.forEach(msg => this.originalWarn(msg)); // Use original to avoid re-buffering
+                          this.originalError("-------------------------------------------\n");
+                      }
+                  },
+                  reset() {
+                      this.buffer = [];
+                  }
+              };
+              LogBuffer.init();
+
+              const Debug = {
+                  enabled: true,
+                  lastLogTime: 0,
+                  logInterval: 10, // seconds
+                  frameTimes: [],
+                  lastSnapshot: "",
+                  perf: {
+                      _timings: {},
+                      _order: [],
+                      start(label) {
+                          if (!Debug.enabled) return;
+                          this._timings[label] = { start: performance.now(), duration: 0 };
+                          if (!this._order.includes(label)) this._order.push(label);
+                      },
+                      end(label) {
+                          if (!Debug.enabled || !this._timings[label]) return;
+                          this._timings[label].duration = performance.now() - this._timings[label].start;
+                      },
+                      getResults() {
+                          let resultStr = "";
+                          this._order.forEach(label => {
+                              if (this._timings[label] && this._timings[label].duration > 0.1) { // Only show significant timings
+                                  resultStr += `${label}: ${this._timings[label].duration.toFixed(1)}ms | `;
+                              }
+                          });
+                          return resultStr.slice(0, -2).trim(); // Remove trailing pipe and space
+                      },
+                      reset() {
+                          this._timings = {};
+                      }
+                  },
+                  init() {
+                      this.lastLogTime = 0;
+                      this.frameTimes = [];
+                      this.lastSnapshot = "";
+                  },
+                  update(delta) {
+                      if (!this.enabled) return;
+                      this.frameTimes.push(delta);
+                      if (delta > 0.2) {
+                          console.warn(`[PERF] Stutter spike detected: Frame took ${(delta * 1000).toFixed(0)}ms`);
+                      }
+                      const currentTime = clock.getElapsedTime();
+                      if (currentTime - this.lastLogTime > this.logInterval) {
+                          this.log(currentTime);
+                          this.lastLogTime = currentTime;
+                      }
+                  },
+                  log(currentTime) {
+                      if (!this.enabled || this.frameTimes.length === 0) return;
+                      const avgDelta = this.frameTimes.reduce((a, b) => a + b, 0) / this.frameTimes.length;
+                      this.frameTimes = [];
+                      const fps = (1 / avgDelta).toFixed(0);
+                      const frameTimeMs = (avgDelta * 1000).toFixed(0);
+                      const mem = renderer.info.memory;
+                      const renderInfo = renderer.info.render;
+                      const convertingState = convertingGroup ? convertingGroup.state : 'none';
+                      const perfResults = this.perf.getResults();
+                      const output = `
+[DEBUG] Time: ${Math.floor(currentTime)}s | FPS: ${fps} | FrameTime: ${frameTimeMs}ms
+  SceneChildren: ${scene.children.length} | Geom=${mem.geometries}, Tex=${mem.textures} | DrawCalls=${renderInfo.calls}
+  Enemies: ${enemies.length}, P.Shots: ${blasterShots.length}, E.Shots: ${enemyProjectiles.length}, Skeletons: ${skeletons.length}, Beams: ${beams.length}
+  Coins: ${coins.length}, Gems: ${gems.length}, Octahedrons: ${octahedronGroups.length} (Converting: ${convertingState}), Bosses: ${bossCount}
+  PlayerHP: ${playerHealth.toFixed(0)}/${playerStats.maxHealth} | Score: ${score} | Level: ${level}
+  Perf: [ ${perfResults} ]
+`;
+                      this.lastSnapshot = output;
+                      console.log(output.trim());
+                      renderer.info.reset();
+                  },
+                  logNow(prefix = "Immediate Log") {
+                      const currentTime = clock.getElapsedTime();
+                      const mem = renderer.info.memory;
+                      const renderInfo = renderer.info.render;
+                      const convertingState = convertingGroup ? convertingGroup.state : 'none';
+                      const output = `
+[${prefix}] Time: ${Math.floor(currentTime)}s
+  SceneChildren: ${scene.children.length} | Geom=${mem.geometries}, Tex=${mem.textures} | DrawCalls=${renderInfo.calls}
+  Enemies: ${enemies.length}, P.Shots: ${blasterShots.length}, E.Shots: ${enemyProjectiles.length}, Skeletons: ${skeletons.length}, Beams: ${beams.length}
+  Coins: ${coins.length}, Gems: ${gems.length}, Octahedrons: ${octahedronGroups.length} (Converting: ${convertingState}), Bosses: ${bossCount}
+  PlayerHP: ${playerHealth.toFixed(0)}/${playerStats.maxHealth} | Score: ${score} | Level: ${level}
+  Perf: [ ${this.perf.getResults()} ]
+`;
+                      this.lastSnapshot = output;
+                      console.log(output.trim());
+                  }
+              };
+
+              const AudioManager = {
+                  sounds: {},
+                  init() {
+                      const soundList = {
+                          explosion: 'https://www.soundjay.com/misc/sounds/explosion-01.wav',
+                          hit: 'https://www.soundjay.com/misc/sounds/hit-01.wav',
+                          coin: 'https://www.soundjay.com/misc/sounds/coin-01.wav',
+                          laser: 'https://www.soundjay.com/misc/sounds/small-laser-gun-01.wav',
+                          windChime: 'https://www.soundjay.com/misc/sounds/wind-chime-01.wav',
+                          gameOver: 'https://www.soundjay.com/misc/sounds/game-over-01.wav'
+                      };
+                      for (const name in soundList) {
+                          this.sounds[name] = new Audio(soundList[name]);
+                      }
+                  },
+                  play(name, volume = 1.0) {
+                      if (this.sounds[name]) {
+                          const sound = this.sounds[name].cloneNode();
+                          sound.volume = volume;
+                          sound.play().catch(e => {}); // Ignore play errors if context not ready
+                      }
+                  }
+              };
+              AudioManager.init();
+
+              const ErrorWatcher = {
+                  errors: {},
+                  maxReports: 5,
+                  report(error) {
+                      const key = error.message || 'Unknown error';
+                      if (!this.errors[key]) {
+                          this.errors[key] = { count: 0, firstSeen: new Date(), error: error };
+                      }
+                      this.errors[key].count++;
+                      if (this.errors[key].count <= this.maxReports) {
+                          console.error("Caught error in game loop:", error);
+                      } else if (this.errors[key].count === this.maxReports + 1) {
+                          console.warn(`Suppressing further logs for error: "${key}". First seen at ${this.errors[key].firstSeen}.`);
+                      }
+                  },
+                  reset() {
+                      this.errors = {};
+                  }
+              };
+
+              class ObjectPool {
+                  constructor(createFn, size = 20) {
+                      this.createFn = createFn;
+                      this.inactive = [];
+                      for (let i = 0; i < size; i++) {
+                          this.inactive.push(this.createFn());
+                      }
+                  }
+                  get() {
+                      let obj;
+                      if (this.inactive.length > 0) {
+                          obj = this.inactive.pop();
+                      } else {
+                          // Pool is empty, create a new one as a fallback
+                          obj = this.createFn();
+                      }
+                      scene.add(obj.mesh);
+                      obj.active = true;
+                      return obj;
+                  }
+                  release(obj) {
+                      scene.remove(obj.mesh);
+                      obj.active = false;
+                      this.inactive.push(obj);
+                  }
+                  dispose() {
+                      this.inactive.forEach(obj => {
+                          if (obj.mesh.geometry) obj.mesh.geometry.dispose();
+                          if (obj.mesh.material) {
+                              if (Array.isArray(obj.mesh.material)) {
+                                  obj.mesh.material.forEach(m => m.dispose());
+                              } else {
+                                  obj.mesh.material.dispose();
+                              }
+                          }
+                      });
+                      this.inactive = [];
+                  }
+              }
+
+
+              class SpatialGrid {
+                  constructor(width, height, cellSize) {
+                      this.width = width;
+                      this.height = height;
+                      this.cellSize = cellSize;
+                      this.gridWidth = Math.ceil(width / cellSize);
+                      this.gridHeight = Math.ceil(height / cellSize);
+                      this.clear();
+                  }
+                  getCellCoords(x, z) {
+                      const gridX = Math.floor((x + this.width / 2) / this.cellSize);
+                      const gridZ = Math.floor((z + this.height / 2) / this.cellSize);
+                      return { gridX, gridZ };
+                  }
+                  getCellIndexFromCoords(gridX, gridZ) {
+                      if (gridX < 0 || gridX >= this.gridWidth || gridZ < 0 || gridZ >= this.gridHeight) return -1;
+                      return gridZ * this.gridWidth + gridX;
+                  }
+                  clear() {
+                      this.grid = new Array(this.gridWidth * this.gridHeight).fill(0).map(() => []);
+                  }
+                  add(obj) {
+                      const { gridX, gridZ } = this.getCellCoords(obj.mesh.position.x, obj.mesh.position.z);
+                      const index = this.getCellIndexFromCoords(gridX, gridZ);
+                      if (index !== -1) this.grid[index].push(obj);
+                  }
+                  getNearby(obj) { // obj is { mesh, radius }
+                      const nearby = new Set();
+                      const position = obj.mesh.position;
+                      const radius = obj.radius || 0; // Use radius if provided, else 0
+                      const { gridX, gridZ } = this.getCellCoords(position.x, position.z);
+                      const cellRadius = Math.max(1, Math.ceil(radius / this.cellSize));
+
+                      for (let dz = -cellRadius; dz <= cellRadius; dz++) {
+                          for (let dx = -cellRadius; dx <= cellRadius; dx++) {
+                              const checkX = gridX + dx;
+                              const checkZ = gridZ + dz;
+                              const index = this.getCellIndexFromCoords(checkX, checkZ);
+                              if (index !== -1) {
+                                  this.grid[index].forEach(item => nearby.add(item));
+                              }
+                          }
+                      }
+                      return Array.from(nearby);
+                  }
+              }
+
+              class DamageNumberManager {
+                  constructor(scene) {
+                      this.scene = scene;
+                      this.activeNumbers = [];
+                      this.pool = [];
+                      this.font = 'bold 24px Arial';
+                      this.STACK_TIME_WINDOW = 0.3; // seconds
+                      this.STACK_Y_OFFSET = 5;
+                  }
+
+                  _createPooledObject() {
+                      const canvas = document.createElement('canvas');
+                      canvas.width = 128;
+                      canvas.height = 64;
+                      const context = canvas.getContext('2d');
+                      const texture = new THREE.CanvasTexture(canvas);
+                      const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false });
+                      const sprite = new THREE.Sprite(material);
+                      sprite.scale.set(20, 10, 1);
+                      return { sprite, canvas, context, texture };
+                  }
+
+                  _getFromPool() {
+                      let obj = this.pool.pop();
+                      if (!obj) {
+                          obj = this._createPooledObject();
+                      }
+                      this.scene.add(obj.sprite);
+                      return obj;
+                  }
+
+                  _releaseToPool(damageNumber) {
+                      this.scene.remove(damageNumber.pooledSprite.sprite);
+                      this.pool.push(damageNumber.pooledSprite);
+                  }
+
+                  create(targetObject, text, options = {}) {
+                      const color = options.isHeal ? '#44FF44' : (options.isCritical ? '#FF0000' : '#FF4444');
+                      const textToDisplay = options.isDodge ? 'DODGE' : (options.isHeal ? `+${text}` : String(Math.round(text)));
+
+                      // Stacking logic using userData on the THREE.Object3D
+                      const now = clock.getElapsedTime();
+                      if (!targetObject.userData.lastDamageNumberTime || now - targetObject.userData.lastDamageNumberTime > this.STACK_TIME_WINDOW) {
+                          targetObject.userData.damageNumberStackCount = 0;
+                      } else {
+                          targetObject.userData.damageNumberStackCount++;
+                      }
+                      targetObject.userData.lastDamageNumberTime = now;
+                      const stackOffset = targetObject.userData.damageNumberStackCount * this.STACK_Y_OFFSET;
+
+                      const pooledSprite = this._getFromPool();
+                      const { sprite, canvas, context, texture } = pooledSprite;
+
+                      context.clearRect(0, 0, canvas.width, canvas.height);
+                      context.font = this.font;
+                      context.fillStyle = options.isDodge ? '#FFFF00' : color;
+                      context.textAlign = 'center';
+                      context.textBaseline = 'middle';
+                      context.strokeStyle = 'black';
+                      context.lineWidth = 4;
+                      context.strokeText(textToDisplay, canvas.width / 2, canvas.height / 2);
+                      context.fillText(textToDisplay, canvas.width / 2, canvas.height / 2);
+                      texture.needsUpdate = true;
+
+                      const damageNumber = {
+                          pooledSprite,
+                          startTime: now,
+                          duration: 1.0,
+                          startPosition: targetObject.position.clone().add(new THREE.Vector3(0, 15 + stackOffset, 0)),
+                          velocity: new THREE.Vector3((Math.random() - 0.5) * 15, 30, 0),
+                          isCritical: !!options.isCritical
+                      };
+
+                      sprite.position.copy(damageNumber.startPosition);
+                      this.activeNumbers.push(damageNumber);
+                  }
+
+                  update() {
+                      const now = clock.getElapsedTime();
+                      this.activeNumbers = this.activeNumbers.filter(num => {
+                          const elapsed = now - num.startTime;
+                          if (elapsed >= num.duration) {
+                              this._releaseToPool(num);
+                              return false;
+                          }
+                          const t = elapsed / num.duration;
+                          const sprite = num.pooledSprite.sprite;
+                          sprite.position.x = num.startPosition.x + num.velocity.x * t;
+                          sprite.position.y = num.startPosition.y + num.velocity.y * t - 0.5 * 60 * t * t;
+                          sprite.material.opacity = 1.0 - t * t;
+                          if (num.isCritical) {
+                              sprite.position.x += (Math.random() - 0.5) * 2;
+                              sprite.position.y += (Math.random() - 0.5) * 2;
+                          }
+                          return true;
+                      });
+                  }
+              }
+
               // Scene
               const scene = new THREE.Scene();
               scene.background = new THREE.Color(0x101010);
@@ -395,9 +775,9 @@
                   if (nearPlayer) {
                       // Expanded spawn range around player
                       position = new THREE.Vector3(
-                          (Math.random() - 0.5) * 200,
+                          (Math.random() - 0.5) * 400,
                           120,
-                          (Math.random() - 0.5) * 200
+                          (Math.random() - 0.5) * 400
                       );
                   } else {
                       position = new THREE.Vector3(
@@ -421,6 +801,10 @@
                       break;
                   }
               } while (tooClose);
+
+              if (tooClose) { // If we broke out of the loop due to failure
+                  continue;   // ...skip creating this octahedron and try the next one in the for loop.
+              }
 
                               const octahedronMaterialInstance = new THREE.MeshStandardMaterial({ color: 0x9932CC, flatShading: true, emissive: 0x9932CC, emissiveIntensity: 0.5 });
               const octahedron = new THREE.Mesh(octahedronGeometry, octahedronMaterialInstance);
@@ -806,9 +1190,12 @@
               let isPlayerHit = false;
               let hitAnimationTime = 0;
               const clock = new THREE.Clock();
+              let healthBarShakeUntil = 0;
               let isGameOver = false;
               let isGamePaused = false;
               const INITIAL_ENEMY_COUNT = 10;
+              let accumulatedRegen = 0;
+              let lastRegenNumberTime = 0;
 
               let gameSpeedMultiplier = 1.0;
               let playerScaleMultiplier = 1.0;
@@ -836,17 +1223,12 @@
               let bossCount = 0;
               let lastBossSpawnScore = 0;
 
-
-
-              function playSound(url, volume = 1.0) {
-                  try {
-                      const audio = new Audio(url);
-                      audio.volume = volume;
-                      audio.play().catch(e => console.log('Audio play failed:', e));
-                  } catch (e) {
-                      console.log('Audio creation failed:', e);
-                  }
-              }
+              // --- Performance Systems ---
+              let objectPools = {};
+              const spatialGrid = new SpatialGrid(2000, 2000, 100);
+              const damageNumberManager = new DamageNumberManager(scene);
+              const MAX_PLAYER_SHOTS = 100;
+              const MAX_ENEMY_SHOTS = 150;
 
               let lastShotTime = 0;
 
@@ -858,12 +1240,13 @@
               const skeletons = [];
               const coins = [];
               const gems = [];
+              const temporaryEffects = [];
               const enemyProjectiles = [];
               const beams = [];
 
               const coinSpriteMaterial = new THREE.SpriteMaterial({ color: 0xffd700 });
               const shooterGeometry = new THREE.TetrahedronGeometry(8);
-              const shooterMaterial = new THREE.MeshStandardMaterial({ color: 0xff00ff, flatShading: true });
+              const shooterMaterial = new THREE.MeshStandardMaterial({ color: 0xff00ff, flatShading: true, emissive: 0xff00ff, emissiveIntensity: 0.4 });
               const enemyProjectileGeometry = new THREE.SphereGeometry(1, 8, 8);
               const enemyProjectileMaterial = new THREE.MeshBasicMaterial({ color: 0xff00ff });
 
@@ -878,8 +1261,11 @@
               
               const enemyPrototypes = {
                   box: {
-                      geometry: (size) => new THREE.BoxGeometry(size, size, size),
-                      getMaterial: () => new THREE.MeshStandardMaterial({ color: new THREE.Color().setHSL(0.1 + Math.random() * 0.8, 1, 0.5) }),
+                      geometry: (size) => new THREE.BoxGeometry(size, size, size),                      
+                      getMaterial: () => {
+                          const materialColor = new THREE.Color().setHSL(0.1 + Math.random() * 0.8, 1, 0.5);
+                          return new THREE.MeshStandardMaterial({ color: materialColor, emissive: materialColor, emissiveIntensity: 0.4 });
+                      },
                       baseHealth: 30, healthRand: 40, healthLevelScale: 10,
                       baseSpeed: 0.2, speedLevelScale: 0.02,
                       contactDamage: 10,
@@ -891,35 +1277,35 @@
                       contactDamage: 10,
                   },
                   tank: {
-                      geometry: () => new THREE.BoxGeometry(25, 25, 25), material: new THREE.MeshStandardMaterial({ color: 0xff4500 }),
+                      geometry: () => new THREE.BoxGeometry(25, 25, 25), material: new THREE.MeshStandardMaterial({ color: 0xff4500, emissive: 0xff4500, emissiveIntensity: 0.4 }),
                       baseHealth: 120, healthRand: 80, healthLevelScale: 30,
                       baseSpeed: 0.1, speedLevelScale: 0.01,
                       contactDamage: 25,
                       specialDrop: { type: 'damage', chance: 0.5 }
                   },
                   berserker: {
-                      geometry: () => new THREE.DodecahedronGeometry(6), material: new THREE.MeshStandardMaterial({ color: 0x32cd32 }),
+                      geometry: () => new THREE.DodecahedronGeometry(6), material: new THREE.MeshStandardMaterial({ color: 0x32cd32, emissive: 0x32cd32, emissiveIntensity: 0.4 }),
                       baseHealth: 1, healthRand: 0, healthLevelScale: 0,
                       baseSpeed: 0.4, speedLevelScale: 0.04,
                       contactDamage: 5,
                       specialDrop: { type: 'speed', chance: 0.5 }
                   },
                   magnetic: {
-                      geometry: () => new THREE.TorusGeometry(8, 3, 8, 16), material: new THREE.MeshStandardMaterial({ color: 0x4169e1 }),
+                      geometry: () => new THREE.TorusGeometry(8, 3, 8, 16), material: new THREE.MeshStandardMaterial({ color: 0x4169e1, emissive: 0x4169e1, emissiveIntensity: 0.4 }),
                       baseHealth: 40, healthRand: 20, healthLevelScale: 8,
                       baseSpeed: 0.15, speedLevelScale: 0.015,
                       contactDamage: 10,
                       specialDrop: { type: 'vacuum', chance: 0.5 }
                   },
                   elite: {
-                      geometry: () => new THREE.IcosahedronGeometry(12), material: new THREE.MeshStandardMaterial({ color: 0xffd700, emissive: 0xffd700, emissiveIntensity: 0.5 }),
+                      geometry: () => new THREE.IcosahedronGeometry(12), material: new THREE.MeshStandardMaterial({ color: 0xffd700, emissive: 0xffd700, emissiveIntensity: 0.6 }),
                       baseHealth: 250, healthRand: 50, healthLevelScale: 20,
                       baseSpeed: 0.18, speedLevelScale: 0.01,
                       contactDamage: 15,
                       specialDrop: { type: 'crit', chance: 0.5 }
                   },
                   phantom: {
-                      geometry: () => new THREE.OctahedronGeometry(10), material: new THREE.MeshStandardMaterial({ color: 0xf0f8ff, transparent: true, opacity: 0.4 }),
+                      geometry: () => new THREE.OctahedronGeometry(10), material: new THREE.MeshStandardMaterial({ color: 0xf0f8ff, transparent: true, opacity: 0.4, emissive: 0xf0f8ff, emissiveIntensity: 0.6 }),
                       baseHealth: 1, healthRand: 0, healthLevelScale: 0, // Takes 1 hit when vulnerable
                       baseSpeed: 0.2, speedLevelScale: 0.02,
                       contactDamage: 10,
@@ -945,11 +1331,15 @@
                   }
                   enemyMesh.scale.set(scale, scale, scale);
 
-                  let x, z;
+                  let x, z, attempts = 0;
                   do {
                       x = (Math.random() - 0.5) * 980;
                       z = (Math.random() - 0.5) * 980;
-                  } while (new THREE.Vector3(x, 5, z).distanceTo(playerCone.position) < 150);
+                      if (attempts++ > 100) {
+                          console.warn("Could not place enemy far from player after 100 attempts.");
+                          break;
+                      }
+                  } while (new THREE.Vector3(x, 5 * scale, z).distanceTo(playerCone.position) < 150);
                   enemyMesh.position.set(x, 5 * scale, z);
 
                   const enemyData = {
@@ -962,10 +1352,13 @@
                       radius: (type === 'tank' ? 12.5 : 8) * scale,
                       contactDamage: proto.contactDamage * (isBoss ? 2 : 1),
                       isBoss: isBoss,
-                      specialDrop: proto.specialDrop
+                  specialDrop: proto.specialDrop,
+                  isGeometryShared: type === 'shooter',
+                  hitEffectUntil: null,
+                  baseEmissiveIntensity: enemyMesh.material.emissiveIntensity
                   };
 
-                  if (type === 'box') {
+                  if (type === 'box' || type === 'shooter' || type === 'elite' || type === 'berserker') {
                       const wireframeGeometry = new THREE.WireframeGeometry(enemyMesh.geometry);
                       const wireframeMaterial = new THREE.LineBasicMaterial({ color: enemyMesh.material.color });
                       const wireframe = new THREE.LineSegments(wireframeGeometry, wireframeMaterial);
@@ -994,29 +1387,54 @@
                   spawnSpecificEnemy(randomBossType, true);
               }
 
-              const spawnWeights = { shooter: 20, tank: 15, berserker: 12, magnetic: 8, elite: 5, phantom: 3 };
-              const totalSpawnWeight = Object.values(spawnWeights).reduce((s, a) => s + a, 0);
+              const enemyUnlockLevels = {
+                  shooter: 2,
+                  tank: 3,
+                  berserker: 4,
+                  magnetic: 5,
+                  elite: 6,
+                  phantom: 7
+              };
 
-              function getWeightedRandomEnemyType() {
-                  let rand = Math.random() * totalSpawnWeight;
-                  for (const type in spawnWeights) {
-                      if (rand < spawnWeights[type]) return type;
-                      rand -= spawnWeights[type];
+              const spawnWeights = { shooter: 20, tank: 15, berserker: 12, magnetic: 8, elite: 5, phantom: 3 };
+
+              function getWeightedRandomEnemyType(currentLevel) {
+                  const availableTypes = [];
+                  for (const type in enemyUnlockLevels) {
+                      if (currentLevel >= enemyUnlockLevels[type]) {
+                          availableTypes.push(type);
+                      }
                   }
-                  return 'shooter'; // Fallback
+
+                  if (availableTypes.length === 0) return null;
+
+                  const availableWeights = {};
+                  let currentTotalWeight = 0;
+                  for (const type of availableTypes) {
+                      if (spawnWeights[type]) {
+                          availableWeights[type] = spawnWeights[type];
+                          currentTotalWeight += spawnWeights[type];
+                      }
+                  }
+
+                  if (currentTotalWeight === 0) return availableTypes[0];
+
+                  let rand = Math.random() * currentTotalWeight;
+                  for (const type in availableWeights) {
+                      if (rand < availableWeights[type]) return type;
+                      rand -= availableWeights[type];
+                  }
+                  return availableTypes[availableTypes.length - 1]; // Fallback
               }
 
               function spawnEnemy() {
-                  const nonBossSlots = MAX_ENEMIES_TOTAL - MAX_BOSSES;
-                  const currentNonBossCount = enemies.length - bossCount;
-
-                  if (currentNonBossCount >= nonBossSlots) return;
-
+                  const nonBossCount = enemies.length - bossCount;
                   const boxCount = enemyCounts['box'] || 0;
-                  if (boxCount / nonBossSlots < MIN_BOX_RATIO) {
+                  const typeToSpawn = getWeightedRandomEnemyType(level);
+
+                  if (typeToSpawn === null || nonBossCount === 0 || (boxCount / nonBossCount < MIN_BOX_RATIO)) {
                       spawnSpecificEnemy('box');
                   } else {
-                      const typeToSpawn = getWeightedRandomEnemyType();
                       spawnSpecificEnemy(typeToSpawn);
                   }
               }
@@ -1026,7 +1444,7 @@
                    spawnEnemy();
                }
 
-              function handleEnemyDeath(enemy) {
+              function handleEnemyDeath(enemy) {                  
                   // --- Add Skeleton ---
                   const skeletonGeometry = enemy.mesh.geometry; // No need to clone for wireframe
                   const skeletonMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, wireframe: true, transparent: true });
@@ -1035,15 +1453,37 @@
                   skeleton.quaternion.copy(enemy.mesh.quaternion);
                   skeleton.scale.copy(enemy.mesh.scale); // Important for bosses
                   scene.add(skeleton);
-                  skeletons.push({mesh: skeleton, createdAt: Date.now()});
+                  skeletons.push({mesh: skeleton, createdAt: Date.now(), isGeometryShared: enemy.isGeometryShared});
+
+                  // --- Resource Cleanup for the original enemy ---
+                  if (enemy.wireframe) {
+                      enemy.mesh.remove(enemy.wireframe);
+                      enemy.wireframe.geometry.dispose();
+                      enemy.wireframe.material.dispose();
+                  }
+                  // All enemy materials are unique clones or new instances, so they can be disposed.
+                  if (enemy.mesh.material) enemy.mesh.material.dispose();
+
                   enemyCounts[enemy.type]--;
                   if (enemy.isBoss) {
                       bossCount--;
-                      experience += 15; // 3x normal 5 gold
+                      // Drop a big XP coin
+                      const coin = new THREE.Sprite(coinSpriteMaterial.clone());
+                      coin.scale.set(6, 6, 1);
+                      coin.position.copy(enemy.mesh.position);
+                      coin.position.y = 2;
+                      scene.add(coin);
+                      coins.push({ mesh: coin, gold: 15 });
+
+                      // Drop 2-5 gems of its type
                       const gemDropCount = 2 + Math.floor(Math.random() * 4); // 2-5 gems
                       for (let i = 0; i < gemDropCount; i++) {
-                          gemCounts[enemy.specialDrop.type]++;
-                          document.getElementById(`gem-${enemy.specialDrop.type}`).textContent = gemCounts[enemy.specialDrop.type];
+                          const gemInfo = gemTypes[enemy.specialDrop.type];
+                          const gem = new THREE.Mesh(gemInfo.geometry, new THREE.MeshStandardMaterial({ color: gemInfo.color, flatShading: true }));
+                          gem.position.copy(enemy.mesh.position).add(new THREE.Vector3(Math.random()*10-5, 0, Math.random()*10-5));
+                          gem.position.y = 2;
+                          scene.add(gem);
+                          gems.push({ mesh: gem, type: enemy.specialDrop.type });
                       }
                   } else {
                       // Normal enemy death
@@ -1051,30 +1491,40 @@
                       if (enemy.specialDrop) {
                           const dropChance = enemy.specialDrop.chance * (1 + (playerStats.luck - 0.5));
                           if (Math.random() < dropChance) {
-                              gemCounts[enemy.specialDrop.type]++;
-                              document.getElementById(`gem-${enemy.specialDrop.type}`).textContent = gemCounts[enemy.specialDrop.type];
+                              const gemInfo = gemTypes[enemy.specialDrop.type];
+                              const gem = new THREE.Mesh(gemInfo.geometry, new THREE.MeshStandardMaterial({ color: gemInfo.color, flatShading: true }));
+                              gem.position.copy(enemy.mesh.position);
+                              gem.position.y = 2;
+                              scene.add(gem);
+                              gems.push({ mesh: gem, type: enemy.specialDrop.type });
                               didSpecialDrop = true;
                           }
                       }
 
                       if (!didSpecialDrop) {
-                          if (Math.random() < 0.1) { // Gem drop
+                          if (Math.random() < 0.1) { // Random Gem drop
                               const gemTypesArray = Object.keys(gemTypes);
                               const randomGemType = gemTypesArray[Math.floor(Math.random() * gemTypesArray.length)];
-                              gemCounts[randomGemType]++;
-                              document.getElementById(`gem-${randomGemType}`).textContent = gemCounts[randomGemType];
+                              const gemInfo = gemTypes[randomGemType];
+                              const gem = new THREE.Mesh(gemInfo.geometry, new THREE.MeshStandardMaterial({ color: gemInfo.color, flatShading: true }));
+                              gem.position.copy(enemy.mesh.position);
+                              gem.position.y = 2;
+                              scene.add(gem);
+                              gems.push({ mesh: gem, type: randomGemType });
                           } else if (Math.random() < playerStats.luck) { // Coin drop
-                              experience += Math.floor(Math.random() * 5) + 1;
+                              const goldAmount = Math.floor(Math.random() * 5) + 1;
+                              const coin = new THREE.Sprite(coinSpriteMaterial.clone());
+                              coin.scale.set(3, 3, 1);
+                              coin.position.copy(enemy.mesh.position);
+                              coin.position.y = 2;
+                              scene.add(coin);
+                              coins.push({ mesh: coin, gold: goldAmount });
                           }
                       }
                   }
 
                   score++;
                   scoreElement.textContent = score;
-                  updateExperienceBar();
-                  if (experience >= experienceToNextLevel) {
-                      levelUp();
-                  }
 
                   // Boss spawn check
                   if (score > 0 && score % 100 === 0 && score !== lastBossSpawnScore) {
@@ -1086,8 +1536,7 @@
                   setTimeout(() => { scoreElement.classList.remove('score-animated'); }, 300);
 
                   scene.remove(enemy.mesh);
-                  playSound('https://www.soundjay.com/misc/sounds/explosion-01.wav', 0.7);
-                  spawnEnemy();
+                  AudioManager.play('explosion', 0.7);
               }
 
               function createExplosion(position, radius) {
@@ -1100,49 +1549,61 @@
                   });
                   const explosion = new THREE.Mesh(explosionGeometry, explosionMaterial);
                   explosion.position.copy(position);
-                  scene.add(explosion);
-
-                  const start = performance.now();
-                  const duration = 300; // ms
-
-                  function animateExplosion() {
-                      const elapsed = performance.now() - start;
-                      const t = elapsed / duration;
-
-                      if (t < 1) {
-                          const scale = t; // Expands from 0 to 1
-                          explosion.scale.set(scale, scale, scale);
-                          explosion.material.opacity = 0.8 * (1 - t); // Fades out
-                          requestAnimationFrame(animateExplosion);
-                      } else {
-                          scene.remove(explosion);
-                          explosion.geometry.dispose();
-                          explosion.material.dispose();
-                      }
-                  }
-                  animateExplosion();
+                  scene.add(explosion);                  
+                  temporaryEffects.push({
+                      mesh: explosion,
+                      startTime: clock.getElapsedTime(),
+                      duration: 0.3, // 300ms
+                      type: 'explosion'
+                  });
               }
 
               let convertingGroup = null;
               let lastOctahedronSpawnTime = 0;
               const octahedronSpawnInterval = 30; // seconds
+              let debugInterval = null;
 
               // Animation loop
               function animate() {
                   animationId = requestAnimationFrame(animate);
-                  
-                  if (isGamePaused) return;
-                  
-                  if (isGameOver) return;
+                  try {
+                      if (isGamePaused) return;
 
-                  const delta = clock.getDelta();
+                      if (isGameOver) return;
+
+                      const delta = clock.getDelta();
+                      Debug.update(delta); // Log previous frame's perf data if needed
+
+                      Debug.perf.reset(); // Reset for current frame's measurements
+
+                  Debug.perf.start('update_main');
 
                   updateConePosition();
 
+
+                  // Clear spatial grid for repopulation
+                  spatialGrid.clear();
+
+                  damageNumberManager.update();
+                  Debug.perf.start('update_pickups');
                   // Health Regeneration
                   if (playerStats.regenRate > 0 && playerHealth < playerStats.maxHealth) {
-                      playerHealth = Math.min(playerStats.maxHealth, playerHealth + playerStats.regenRate * delta);
+                      const healingThisFrame = playerStats.regenRate * delta;
+                      playerHealth = Math.min(playerStats.maxHealth, playerHealth + healingThisFrame);
                       healthBarElement.style.width = (playerHealth / playerStats.maxHealth) * 100 + '%';
+
+                      accumulatedRegen += healingThisFrame;
+                      const now = clock.getElapsedTime();
+                      if (now - lastRegenNumberTime > 1.0) { // Show number every 1 second
+                          if (accumulatedRegen >= 1.0) {
+                              damageNumberManager.create(playerCone, Math.round(accumulatedRegen), { isHeal: true });
+                              accumulatedRegen = 0;
+                              lastRegenNumberTime = now;
+                          } else if (accumulatedRegen > 0) {
+                              // Reset timer even if we don't show a number to prevent infinite accumulation on very low regen
+                              lastRegenNumberTime = now;
+                          }
+                      }
                   }
 
                   // Update skeletons
@@ -1153,6 +1614,10 @@
                           skeleton.mesh.material.opacity -= 0.05;
                           if (skeleton.mesh.material.opacity <= 0) {
                               scene.remove(skeleton.mesh);
+                          if (!skeleton.isGeometryShared) {
+                              skeleton.mesh.geometry.dispose();
+                          }
+                              skeleton.mesh.material.dispose();
                               skeletons.splice(i, 1);
                           }
                       }
@@ -1164,9 +1629,14 @@
                       const distance = playerCone.position.distanceTo(coin.mesh.position);
                       if (distance < 5) { // pickupDistance is 5
                           experience += coin.gold;
+                          updateExperienceBar();
+                          if (experience >= experienceToNextLevel) {
+                              levelUp();
+                          }
                           scene.remove(coin.mesh);
                           coins.splice(i, 1);
-                          playSound('https://www.soundjay.com/misc/sounds/coin-01.wav', 0.5);                      } else if (distance < playerStats.coinPickupRadius) {
+                          AudioManager.play('coin', 0.5);
+                      } else if (distance < playerStats.coinPickupRadius) {
                           const direction = new THREE.Vector3().subVectors(playerCone.position, coin.mesh.position).normalize();
                           coin.mesh.position.addScaledVector(direction, 4);
                       }
@@ -1180,21 +1650,41 @@
                           document.getElementById(`gem-${gem.type}`).textContent = gemCounts[gem.type];
                           scene.remove(gem.mesh);
                           gems.splice(i, 1);
-                          playSound('https://www.soundjay.com/misc/sounds/coin-01.wav', 0.5);
+                          // Gem geometry is shared, but material is unique per-instance.
+                          gem.mesh.material.dispose();
+                          AudioManager.play('coin', 0.5);
                       } else if (distance < playerStats.pickupRadius) {
                           const direction = new THREE.Vector3().subVectors(playerCone.position, gem.mesh.position).normalize();
                           gem.mesh.position.addScaledVector(direction, 4);
                       }
                   }
+                  Debug.perf.end('update_pickups');
 
+                  Debug.perf.start('update_enemies');
                   // Update enemy positions
                   for (let i = enemies.length - 1; i >= 0; i--) {
                       const enemy = enemies[i];
 
+                      // If a hit flash is active and has expired, reset the flash effect
+                      if (enemy.hitEffectUntil && clock.getElapsedTime() > enemy.hitEffectUntil) {
+                          if (enemy.mesh.material) {
+                              // Restore the emissive color from the flash (white) back to the enemy's base color
+                              enemy.mesh.material.emissive.copy(enemy.mesh.material.color);
+                          }
+                          enemy.hitEffectUntil = null;
+                      }
+
                       if (enemy.type === 'phantom' && enemy.isVulnerable && clock.getElapsedTime() > enemy.vulnerableUntil) {
                           enemy.isVulnerable = false;
                           enemy.teleportCount = 0;
-                          enemy.mesh.material.emissive.set(0x000000);
+                          enemy.mesh.material.emissive.copy(enemy.mesh.material.color);
+                      }
+
+                      // If not under a white-flash hit effect or special state, update emissive intensity based on health
+                      const isPhantomVulnerable = enemy.type === 'phantom' && enemy.isVulnerable;
+                      if (!enemy.hitEffectUntil && !isPhantomVulnerable && enemy.mesh.material && enemy.baseEmissiveIntensity) {
+                          const healthRatio = Math.max(0, enemy.health / enemy.maxHealth);
+                          enemy.mesh.material.emissiveIntensity = enemy.baseEmissiveIntensity * healthRatio;
                       }
 
                       if (enemy.type === 'magnetic') {
@@ -1236,7 +1726,7 @@
 
                           // Shoot at the closest target (player or active octahedron)
                           const maxRange = 180;
-                          const currentTime = clock.getElapsedTime();                          const shootCooldown = enemy.type === 'elite' ? 3 : 2;
+                          const currentTime = clock.getElapsedTime(); const shootCooldown = enemy.type === 'elite' ? 3 : 2;
                           if (currentTime - enemy.lastShotTime > 2) { // 2-second cooldown
                               let targetPosition = null;
                               let minDistance = maxRange;
@@ -1264,10 +1754,13 @@
                                   const baseDirection = new THREE.Vector3().subVectors(targetPosition, enemy.mesh.position).normalize();
 
                                   const spawnProjectile = (dir) => {
-                                      const projectile = new THREE.Mesh(enemyProjectileGeometry, enemyProjectileMaterial);
-                                      projectile.position.copy(enemy.mesh.position);
-                                      enemyProjectiles.push({ mesh: projectile, direction: dir, range: maxRange + 50, distanceTraveled: 0 });
-                                      scene.add(projectile);
+                                      if (enemyProjectiles.length >= MAX_ENEMY_SHOTS) return;
+                                      const projectile = objectPools.enemyProjectiles.get();
+                                      projectile.mesh.position.copy(enemy.mesh.position);
+                                      projectile.direction = dir;
+                                      projectile.range = maxRange + 50;
+                                      projectile.distanceTraveled = 0;
+                                      enemyProjectiles.push(projectile);
                                   };
 
                                   if (enemy.type === 'elite') {
@@ -1284,6 +1777,13 @@
                           }
                       }
 
+                      // Clamp enemy Y position to keep them on the ground plane.
+                      // The spawn Y is 5 * scale, which is based on half the geometry height.
+                      enemy.mesh.position.y = 5 * enemy.mesh.scale.x;
+
+                      // Add enemy to the grid AFTER its position has been updated
+                      spatialGrid.add(enemy);
+
                       // Collision with octahedrons
                       for (let k = octahedronGroups.length - 1; k >= 0; k--) {
                           const group = octahedronGroups[k];
@@ -1296,6 +1796,9 @@
                               group.octahedron.material.emissive.set(color);
 
                               if (group.health <= 0) {
+                                  group.octahedron.material.dispose();
+                                  group.ring.geometry.dispose();
+                                  group.ring.material.dispose();
                                   scene.remove(group.octahedron);
                                   scene.remove(group.ring);
                                   scene.remove(group.light);
@@ -1304,61 +1807,73 @@
 
                               scene.remove(enemy.mesh);
                               enemies.splice(i, 1);
-                              spawnEnemy();
                               break;
                           }
                       }
                   }
+                  Debug.perf.end('update_enemies');
+
+                  Debug.perf.start('update_projectiles');
 
                   // Update enemy projectiles
                   for (let i = enemyProjectiles.length - 1; i >= 0; i--) {
                       const projectile = enemyProjectiles[i];
+                      let projectileConsumed = false;
                       const travelDistance = BASE_ENEMY_PROJECTILE_SPEED * gameSpeedMultiplier;
                       projectile.mesh.position.addScaledVector(projectile.direction, travelDistance);
+                      spatialGrid.add(projectile);
                       projectile.distanceTraveled += travelDistance;
 
                       // Collision with player
                       if (projectile.mesh.position.distanceTo(playerCone.position) < playerStats.playerRadius) {
-                          scene.remove(projectile.mesh);
+                          objectPools.enemyProjectiles.release(projectile);
                           enemyProjectiles.splice(i, 1);
 
                           if (Math.random() < playerStats.dodgeChance) {
                               // DODGE!
-                              playSound('https://www.soundjay.com/misc/sounds/hit-01.wav', 0.2); // a soft 'whoosh' would be better
+                          damageNumberManager.create(playerCone, '', { isDodge: true });
+                              AudioManager.play('hit', 0.2); // a soft 'whoosh' would be better
                           } else {
                               const damageTaken = 5 * (50 / (50 + playerStats.armor));
                               playerHealth -= damageTaken;
                               healthBarElement.style.width = (playerHealth / playerStats.maxHealth) * 100 + '%';
+                          damageNumberManager.create(playerCone, damageTaken, {});
                               isPlayerHit = true;
                               hitAnimationTime = 0;
-                              playSound('https://www.soundjay.com/misc/sounds/hit-01.wav', 0.8);
+                              AudioManager.play('hit', 0.8);
                           }
                           continue;
                       }
 
-                      // Collision with octahedrons
                       for (let k = octahedronGroups.length - 1; k >= 0; k--) {
                           const group = octahedronGroups[k];
                           if (group.state === 'active' && projectile.mesh.position.distanceTo(group.octahedron.position) < group.radius) {
                               group.health -= 10;
-                              scene.remove(projectile.mesh);
+                              objectPools.enemyProjectiles.release(projectile);
                               enemyProjectiles.splice(i, 1);
                               if (group.health <= 0) {
+                                  group.octahedron.material.dispose();
+                                  group.ring.geometry.dispose();
+                                  group.ring.material.dispose();
                                   scene.remove(group.octahedron);
                                   scene.remove(group.ring);
                                   scene.remove(group.light);
                                   octahedronGroups.splice(k, 1);
-                                  playSound('https://www.soundjay.com/misc/sounds/explosion-01.wav', 1.0);
+                                  AudioManager.play('explosion', 1.0);
                               } else {
-                                  playSound('https://www.soundjay.com/misc/sounds/hit-01.wav', 0.4);
+                                  AudioManager.play('hit', 0.4);
                               }
-                              break;
+                              projectileConsumed = true;
+                              break; // Exit the octahedron check loop.
                           }
                       }
 
+                      if (projectileConsumed) continue;
+
                       // Remove if it goes too far
-                      if (projectile.distanceTraveled > projectile.range) {
-                          scene.remove(projectile.mesh);
+                      // Need to check if projectile still exists because it might have been removed by collision
+                      if (projectile.active && projectile.distanceTraveled > projectile.range) {
+                          objectPools.enemyProjectiles.release(projectile);
                           enemyProjectiles.splice(i, 1);
                       }
                   }
@@ -1368,10 +1883,14 @@
                       const beam = beams[i];
                       if (clock.getElapsedTime() - beam.creationTime > 0.1) { // Beam visible for 100ms
                           scene.remove(beam.mesh);
+                          beam.mesh.geometry.dispose();
+                          beam.mesh.material.dispose();
                           beams.splice(i, 1);
                       }
                   }
+                  Debug.perf.end('update_projectiles');
 
+                  Debug.perf.start('update_spawners');
                   // Octahedron spawning logic
                   const currentTime = clock.getElapsedTime();
                   if (currentTime - lastOctahedronSpawnTime > octahedronSpawnInterval) {
@@ -1382,85 +1901,101 @@
                           spawnOctahedrons(1, false);
                       }
                   }
+                  Debug.perf.end('update_spawners');
 
+                  Debug.perf.start('update_player_shoot');
                   // Auto-shoot at nearest enemy
-                  const autoShootCurrentTime = clock.getElapsedTime();
-                  const effectiveCooldown = playerStats.attackSpeed * (1 - playerStats.cooldownReduction);
-                  if (autoShootCurrentTime - lastShotTime >= effectiveCooldown) {
-                      let nearestEnemy = null;
-                      let minDistance = Infinity;
+                  const now = clock.getElapsedTime();
+                  const baseCooldown = Math.max(0.05, playerStats.attackSpeed * (1 - playerStats.cooldownReduction)); // clamp
 
-                      for (const enemy of enemies) {
-                          const distance = playerCone.position.distanceTo(enemy.mesh.position);
-                          if (distance < minDistance) {
-                              minDistance = distance;
-                              nearestEnemy = enemy;
+                  if (now - lastShotTime >= baseCooldown) {                    
+                    let nearest = null;
+                    let bestDistance = playerStats.attackDistance;
+                    
+                    // --- OPTIMIZATION: Use spatial grid to find a target ---
+                    const potentialTargets = spatialGrid.getNearby({
+                        mesh: playerCone,
+                        radius: playerStats.attackDistance
+                    });
+
+                    for (const enemy of potentialTargets) {
+                      if (!enemy.health || enemy.health <= 0) continue;
+                      const distance = playerCone.position.distanceTo(enemy.mesh.position);
+                      if (distance < bestDistance) {
+                        bestDistance = distance;
+                        nearest = enemy;
+                      }
+                    }
+
+                    // If we found a valid target within range
+                    if (nearest) {
+                      lastShotTime = now;
+
+                      const origin = playerCone.position.clone();
+                      const target = nearest.mesh.position.clone();
+                      target.y = origin.y; // fire on horizontal plane
+                      const dir = new THREE.Vector3().subVectors(target, origin).normalize();
+
+                      if (blasterShots.length < MAX_PLAYER_SHOTS) {
+                        const shot = objectPools.blasterShots.get();
+                        shot.mesh.position.copy(origin);
+                        shot.targetPoint = origin.clone().addScaledVector(dir, 1000);
+                        shot.initialPosition = origin.clone();
+                        shot.pierceLeft = playerStats.pierceCount;
+                        shot.hitEnemies.length = 0;
+                        blasterShots.push(shot);
+                        AudioManager.play('laser', 0.5);
                           }
-                      }
-
-                      if (nearestEnemy && minDistance <= playerStats.attackDistance) {
-                          lastShotTime = autoShootCurrentTime;
-
-                          const clickedPoint = nearestEnemy.mesh.position.clone();
-                          clickedPoint.y = playerCone.position.y;
-                          const origin = playerCone.position.clone();
-                          const direction = new THREE.Vector3().subVectors(clickedPoint, origin).normalize();
-                          const extendedTargetPoint = new THREE.Vector3().copy(origin).addScaledVector(direction, 1000);
-
-                                              const blasterGeometry = new THREE.SphereGeometry(1.5, 8, 8);
-                                              const blasterMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000, emissive: 0xff0000, emissiveIntensity: 5 });
-                          const blaster = new THREE.Mesh(blasterGeometry, blasterMaterial);
-                          blaster.position.copy(playerCone.position);
-                          scene.add(blaster);
-
-                          blasterShots.push({
-                              blaster,
-                              targetPoint: extendedTargetPoint,
-                              initialPosition: origin.clone(),
-                              pierceLeft: playerStats.pierceCount,
-                              hitEnemies: []
-                          });
-                          playSound('https://www.soundjay.com/misc/sounds/small-laser-gun-01.wav', 0.5);
-                      }
+                    }
                   }
+                  Debug.perf.end('update_player_shoot');
 
-                  // Collision detection between player and enemies
-                  for (let i = enemies.length - 1; i >= 0; i--) {
-                      const enemy = enemies[i];
+                  Debug.perf.start('update_player_collision');
+                  // --- OPTIMIZATION: Use spatial grid for player-enemy collision ---
+                  const nearbyToPlayer = spatialGrid.getNearby({
+                      mesh: playerCone,
+                      radius: playerStats.playerRadius + 30 // Check a slightly larger radius
+                  });
+
+                  for (const enemy of nearbyToPlayer) {
+                      if (!enemy.health || enemy.health <= 0 || !enemy.radius) continue; // Ensure enemy is valid
+
                       if (playerCone.position.distanceTo(enemy.mesh.position) < (playerStats.playerRadius + enemy.radius)) {
                           if (Math.random() < playerStats.dodgeChance) {
-                              // DODGE!
-                              playSound('https://www.soundjay.com/misc/sounds/hit-01.wav', 0.2);
-                          } else {
-                              const damageTaken = enemy.contactDamage * (50 / (50 + playerStats.armor));
-                              playerHealth -= damageTaken;
-                              healthBarElement.style.width = (playerHealth / playerStats.maxHealth) * 100 + '%';
-                              isPlayerHit = true;
-                              hitAnimationTime = 0;
-                              playSound('https://www.soundjay.com/misc/sounds/hit-01.wav', 0.8);
+                              damageNumberManager.create(playerCone, '', { isDodge: true });
+                              continue; // Dodge
                           }
 
-                          healthBarElement.parentElement.classList.add('health-bar-shaking');
-                          setTimeout(() => {
-                              healthBarElement.parentElement.classList.remove('health-bar-shaking');
-                          }, 300);
-
-                          scene.remove(enemy.mesh);
-                          enemies.splice(i, 1);
-                          spawnEnemy();
+                          const damageTaken = enemy.contactDamage * (50 / (50 + playerStats.armor));
+                          playerHealth -= damageTaken;
+                          healthBarElement.style.width = (playerHealth / playerStats.maxHealth) * 100 + '%';
+                          damageNumberManager.create(playerCone, damageTaken, {});
+                          isPlayerHit = true;
+                          hitAnimationTime = 0;
+                          AudioManager.play('hit', 0.8);
+                          healthBarElement.parentElement.classList.add('health-bar-shaking');                          
+                          healthBarShakeUntil = clock.getElapsedTime() + 0.3;
+                          enemy.health = 0; // Mark for death
                       }
                   }
+                  Debug.perf.end('update_player_collision');
 
+                  Debug.perf.start('update_blaster_shots');
                   // Update blaster shots
                   for (let i = blasterShots.length - 1; i >= 0; i--) {
                       const shot = blasterShots[i];
-                      const direction = new THREE.Vector3().subVectors(shot.targetPoint, shot.blaster.position).normalize();
-                      shot.blaster.position.addScaledVector(direction, playerStats.projectileSpeed);
+                      const direction = new THREE.Vector3().subVectors(shot.targetPoint, shot.mesh.position).normalize();
+                      shot.mesh.position.addScaledVector(direction, playerStats.projectileSpeed);
+                      spatialGrid.add({ mesh: shot.mesh, radius: 2 }); // Add shot to grid
 
+                      let shotConsumed = false;
                       // Collision detection with enemies
-                      for (let j = enemies.length - 1; j >= 0; j--) {
-                          const enemy = enemies[j];
-                          if (shot.blaster.position.distanceTo(enemy.mesh.position) < (shot.blaster.geometry.parameters.radius + enemy.radius) && !shot.hitEnemies.includes(enemy)) {
+                      const nearbyEnemies = spatialGrid.getNearby({ mesh: shot.mesh, radius: 2 });
+                      for (const enemy of nearbyEnemies) {                          
+                          // Guard clauses: ensure enemy is valid, alive, not already hit by this shot, and in range.
+                          if (!enemy.health || enemy.health <= 0 || shot.hitEnemies.includes(enemy)) continue;
+
+                          if (shot.mesh.position.distanceTo(enemy.mesh.position) < (shot.mesh.geometry.parameters.radius + enemy.radius)) {
                               if (enemy.type === 'phantom' && !enemy.isVulnerable) {
                                   enemy.teleportCount++;
                                   if (enemy.teleportCount >= enemy.teleportsBeforeVulnerable) {
@@ -1474,65 +2009,76 @@
                                       enemy.mesh.position.x += Math.cos(angle) * distance;
                                       enemy.mesh.position.z += Math.sin(angle) * distance;
                                   }
-                                  playSound('https://www.soundjay.com/misc/sounds/wind-chime-01.wav', 0.6);
+                                  AudioManager.play('windChime', 0.6);
                                   shot.pierceLeft = 0; // Consume shot
                               } else {
-                              shot.pierceLeft--;
-                              shot.hitEnemies.push(enemy);
+                                  shot.pierceLeft--;
+                                  shot.hitEnemies.push(enemy);
 
-                              let currentDamage = playerStats.damage;
-                              if (Math.random() < playerStats.critChance) {
-                                  currentDamage *= playerStats.critMultiplier;
-                                  // TODO: Add visual indicator for crit
-                              }
+                                  let currentDamage = playerStats.damage;
+                                  let isCritical = false;
+                                  if (Math.random() < playerStats.critChance) {
+                                      currentDamage *= playerStats.critMultiplier;
+                                      isCritical = true;
+                                  }
 
-                              enemy.health -= currentDamage;
+                                  enemy.health -= currentDamage;
+                                  damageNumberManager.create(enemy.mesh, currentDamage, { isCritical });
 
-                              // Area Damage
-                              if (playerStats.areaDamageRadius > 0) {
-                                  createExplosion(enemy.mesh.position, playerStats.areaDamageRadius);
-                                  const areaDamage = currentDamage * 0.5;
-                                  for (let k = enemies.length - 1; k >= 0; k--) {
-                                      const otherEnemy = enemies[k];
-                                      if (otherEnemy === enemy || shot.hitEnemies.includes(otherEnemy)) continue;
-                                      if (enemy.mesh.position.distanceTo(otherEnemy.mesh.position) < playerStats.areaDamageRadius + otherEnemy.radius) {
-                                          otherEnemy.health -= areaDamage;
-                                          if (otherEnemy.health <= 0) {
-                                              // Marked for death, will be cleaned up later
+                                  // Area Damage
+                                  if (playerStats.areaDamageRadius > 0) {
+                                      createExplosion(enemy.mesh.position, playerStats.areaDamageRadius);                                  
+                                      const areaDamage = currentDamage * 0.5; // AoE does 50% of primary hit damage
+
+                                      // Use spatial grid to find victims for AoE damage - MUCH more performant
+                                      const aoeVictims = spatialGrid.getNearby({
+                                          mesh: { position: enemy.mesh.position }, // Query from the explosion center
+                                          radius: playerStats.areaDamageRadius
+                                      });
+
+                                      for (const otherEnemy of aoeVictims) {
+                                          // Skip if it's not a valid enemy, the one that triggered the explosion, or already hit by this shot
+                                          if (!otherEnemy.health || otherEnemy === enemy || shot.hitEnemies.includes(otherEnemy)) continue;
+
+                                          // Final distance check for accuracy
+                                          if (enemy.mesh.position.distanceTo(otherEnemy.mesh.position) < playerStats.areaDamageRadius + otherEnemy.radius) {
+                                              otherEnemy.health -= areaDamage;
+                                              damageNumberManager.create(otherEnemy.mesh, areaDamage, { isCritical: false }); // AoE hits can't be crits
                                           }
                                       }
                                   }
-                              }
 
-                              if (enemy.health > 0) {
-                                  // Hit effects for non-lethal hit
-                                  enemy.mesh.material.emissive = new THREE.Color(0xffffff);
-                                  enemy.mesh.material.emissiveIntensity = 1;
-                                  setTimeout(() => {
-                                      if (enemy.mesh.material) {
-                                          enemy.mesh.material.emissive = new THREE.Color(0x000000);
-                                      }
-                                  }, 100);
-                                  playSound('https://www.soundjay.com/misc/sounds/hit-01.wav', 0.3);
-                              }
+                                  if (enemy.health > 0) {
+                                      // Hit effects for non-lethal hit
+                                      enemy.mesh.material.emissive.set(0xffffff);
+                                      enemy.mesh.material.emissiveIntensity = 1;
+                                      enemy.hitEffectUntil = clock.getElapsedTime() + 0.1;
+                                      AudioManager.play('hit', 0.3);
+                                  }
                               }
 
                               if (shot.pierceLeft <= 0) {
-                                  scene.remove(shot.blaster);
+                                  objectPools.blasterShots.release(shot);
                                   blasterShots.splice(i, 1);
-                                  break; // Shot is used up, exit inner loop
+                                  shotConsumed = true;
+                                  break; // Shot is used up, exit inner enemy-check loop
                               }
                           }
                       }
 
-                      if (shot.blaster.position.distanceTo(shot.initialPosition) > 1000) {
-                          scene.remove(shot.blaster);
+                      if (shotConsumed) continue; // Move to the next shot
+
+                      // Check if shot still exists before this check
+                      if (shot.active && shot.mesh.position.distanceTo(shot.initialPosition) > playerStats.attackDistance + 50) {
+                          objectPools.blasterShots.release(shot);
                           blasterShots.splice(i, 1);
                           continue;
                       }
                   }
+                  Debug.perf.end('update_blaster_shots');
 
 
+                  Debug.perf.start('update_octahedrons');
                   // Octahedron interaction
                   // Octahedron interaction
                   if (convertingGroup) {
@@ -1608,28 +2154,12 @@
           const flash = new THREE.Mesh(flashGeometry, flashMaterial);
           flash.position.copy(group.octahedron.position);
           scene.add(flash);
-
-          // Animate flash shrinking & fading
-          const start = performance.now();
-          const duration = 500; // ms
-
-          function animateFlash() {
-              const elapsed = performance.now() - start;
-              const t = elapsed / duration;
-
-              if (t < 1) {
-                  const scale = 1 + (1 - t); // shrink over time
-                  flash.scale.set(scale, scale, scale);
-                  flash.material.opacity = 0.6 * (1 - t);
-                  requestAnimationFrame(animateFlash);
-              } else {
-                  scene.remove(flash);
-                  flash.geometry.dispose();
-                  flash.material.dispose();
-              }
-          }
-
-          animateFlash();
+          temporaryEffects.push({
+              mesh: flash,
+              startTime: clock.getElapsedTime(),
+              duration: 0.5, // 500ms
+              type: 'flash'
+          });
       }
 
 
@@ -1658,11 +2188,18 @@
                           group.octahedron.material.emissive.set(color);
                           // Turret logic from before
                           const currentTime = clock.getElapsedTime();
-                          if (currentTime - group.lastShotTime > (BASE_OCTAHEDRON_COOLDOWN / gameSpeedMultiplier)) { // 0.4 shots per second
+                          if (currentTime - group.lastShotTime > (BASE_OCTAHEDRON_COOLDOWN / gameSpeedMultiplier)) {
                               let nearestEnemy = null;
                               let minDistance = 200; // Max range
 
-                              for (const enemy of enemies) {
+                              // --- OPTIMIZATION: Use spatial grid to find potential targets ---
+                              const potentialTargets = spatialGrid.getNearby({
+                                  mesh: { position: group.octahedron.position },
+                                  radius: minDistance
+                              });
+
+                              for (const enemy of potentialTargets) {
+                                  if (!enemy.health || enemy.health <= 0) continue;
                                   const distance = group.octahedron.position.distanceTo(enemy.mesh.position);
                                   if (distance < minDistance) {
                                       minDistance = distance;
@@ -1675,26 +2212,25 @@
 
                                   // Start and end points
                                   const start = group.octahedron.position.clone();
-                                  // Adjust start position to the bottom tip of the scaled octahedron
-                                  start.y -= group.radius * group.octahedron.scale.y;
+                                  start.y -= group.radius * group.octahedron.scale.y; // Adjust to the bottom tip
                                   const beamDirection = new THREE.Vector3().subVectors(nearestEnemy.mesh.position, start).normalize();
                                   const beamLength = 1000; // maximum beam reach
                                   const end = start.clone().addScaledVector(beamDirection, beamLength);
 
-                                  // === Beam visual (thick green glowing cylinder) ===
                                   const beamThickness = 1.0; // Controls beam width
                                   const distance = start.distanceTo(end);
                                   const beamGeometry = new THREE.CylinderGeometry(beamThickness, beamThickness, distance, 8);
-                                  const beamMaterial = new THREE.MeshBasicMaterial({
+                                  const beamMaterial = new THREE.MeshStandardMaterial({
                                       color: 0x00ff00,
-                                      transparent: true,
-                                      opacity: 0.6,
                                       emissive: 0x00ff00,
-                                      emissiveIntensity: 2
+                                      emissiveIntensity: 3,
+                                      transparent: true,
+                                      opacity: 0.7,
+                                      metalness: 0,
+                                      roughness: 1
                                   });
                                   const beam = new THREE.Mesh(beamGeometry, beamMaterial);
 
-                                  // Position and orient the cylinder to align with the beam direction
                                   beam.position.copy(start).lerp(end, 0.5);
                                   const upVector = new THREE.Vector3(0, 1, 0);
                                   beam.quaternion.setFromUnitVectors(upVector, beamDirection);
@@ -1702,20 +2238,23 @@
                                   scene.add(beam);
                                   beams.push({ mesh: beam, creationTime: currentTime, start, end, damage: 60 }); // Beam damage is separate for now
 
-                                  // === Beam collision detection (segment-to-sphere) ===
-                                  for (let i = enemies.length - 1; i >= 0; i--) {
-                                      const enemy = enemies[i];
+                                  // --- OPTIMIZATION: Use the same potential targets for collision ---
+                                  const segDir = new THREE.Vector3().subVectors(end, start);
+                                  const segLenSq = segDir.lengthSq();
+                                  for (const enemy of potentialTargets) {
+                                      if (!enemy.health || enemy.health <= 0) continue;
+
                                       const enemyPos = enemy.mesh.position.clone();
-                                      const segDir = new THREE.Vector3().subVectors(end, start);
-                                      const segLenSq = segDir.lengthSq();
                                       const t = Math.max(0, Math.min(1, enemyPos.clone().sub(start).dot(segDir) / segLenSq));
                                       const closestPoint = start.clone().addScaledVector(segDir, t);
                                       const distToBeam = enemyPos.distanceTo(closestPoint);
 
-                                      if (distToBeam < enemy.radius) {
-                                          enemy.health -= 60; // Beam damage
+                                      if (distToBeam < (enemy.radius + beamThickness)) {
+                                          const beamDamage = 60;
+                                          enemy.health -= beamDamage; // Beam damage
+                                          damageNumberManager.create(enemy.mesh, beamDamage, { isCritical: false });
                                           if (enemy.health > 0) {
-                                              playSound('https://www.soundjay.com/misc/sounds/hit-01.wav', 0.3);
+                                              AudioManager.play('hit', 0.3);
                                           }
                                       }
                                   }
@@ -1724,7 +2263,37 @@
                           }
                       }
                   }
+                  Debug.perf.end('update_octahedrons');
 
+                  Debug.perf.start('update_effects');
+                  const nowForEffects = clock.getElapsedTime(); // Use a consistent time for this block
+                  for (let i = temporaryEffects.length - 1; i >= 0; i--) {
+                      const effect = temporaryEffects[i];
+                      const elapsed = nowForEffects - effect.startTime;
+                      const t = Math.min(elapsed / effect.duration, 1.0);
+
+                      if (t >= 1) {
+                          scene.remove(effect.mesh);
+                          if(effect.mesh.geometry) effect.mesh.geometry.dispose();
+                          if(effect.mesh.material) effect.mesh.material.dispose();
+                          temporaryEffects.splice(i, 1);
+                      } else {
+                          // Apply animation based on type
+                          if (effect.type === 'explosion') {
+                              const scale = t;
+                              effect.mesh.scale.set(scale, scale, scale);
+                              effect.mesh.material.opacity = 0.8 * (1 - t);
+                          } else if (effect.type === 'flash') {
+                              const scale = 1 + (1 - t);
+                              effect.mesh.scale.set(scale, scale, scale);
+                              effect.mesh.material.opacity = 0.6 * (1 - t);
+                          }
+                      }
+                  }
+                  Debug.perf.end('update_effects');
+
+
+                  Debug.perf.start('update_camera_and_fx');
                   camera.position.copy(playerCone.position).add(cameraOffset);
                   camera.lookAt(playerCone.position);
 
@@ -1738,6 +2307,11 @@
                           playerCone.material.color.set(playerConeOriginalColor);
                           playerCone.material.emissive.set(playerConeOriginalColor);
                       }
+                  }
+                  
+                  if (healthBarShakeUntil > 0 && clock.getElapsedTime() > healthBarShakeUntil) {
+                      healthBarElement.parentElement.classList.remove('health-bar-shaking');
+                      healthBarShakeUntil = 0;
                   }
 
                   if (playerHealth <= 0) {
@@ -1753,7 +2327,7 @@
                       gameOverElement.style.fontFamily = "'Press Start 2P', cursive";
                       gameOverElement.style.fontSize = '64px';
                       document.body.appendChild(gameOverElement);
-                      playSound('https://www.soundjay.com/misc/sounds/game-over-01.wav', 1.0);
+                      AudioManager.play('gameOver', 1.0);
 
                       const resetButton = document.getElementById('reset-button');
                       if (resetButton) {
@@ -1770,6 +2344,9 @@
                       }
                   }
 
+                  Debug.perf.end('update_camera_and_fx');
+
+                  Debug.perf.start('update_cleanup');
                   // Enemy cleanup loop
                   for (let i = enemies.length - 1; i >= 0; i--) {
                       if (enemies[i].health <= 0) {
@@ -1777,13 +2354,28 @@
                           enemies.splice(i, 1);
                       }
                   }
+                  Debug.perf.end('update_cleanup');
 
+                  Debug.perf.start('update_respawn');
                   // Ensure enough enemies are spawned based on level
                   while (enemies.length < maxEnemies) {
                       spawnEnemy();
                   }
+                  Debug.perf.end('update_respawn');
+                  Debug.perf.end('update_main');
 
+                  Debug.perf.start('render');
                   renderer.render(scene, camera);
+                  Debug.perf.end('render');
+                  } catch (e) {
+                      ErrorWatcher.report(e);
+                      console.error("--- GAME PAUSED DUE TO ERROR ---");
+                      Debug.logNow("ERROR SNAPSHOT");
+                      LogBuffer.dump();
+                      console.error("Full error object:", e);
+                      // To prevent the game from freezing in a broken state, we can pause it.
+                      isGamePaused = true;
+                  }
               }
 
               // Handle window resize
@@ -1826,7 +2418,7 @@
                   showLevelUpPopup();
 
                   // Increase max enemies with level
-                  maxEnemies = INITIAL_ENEMY_COUNT + (level - 1) * 2;
+                  maxEnemies = Math.min(MAX_ENEMIES_TOTAL, INITIAL_ENEMY_COUNT + (level - 1) * 2);
               }
 
               const statUpgradePool = {
@@ -1940,6 +2532,7 @@
                       case 'attackSpeed': playerStats.attackSpeed = Math.max(0.05, playerStats.attackSpeed * option.value); break;
                       case 'maxHealth': 
                           playerStats.maxHealth += option.value;
+                          damageNumberManager.create(playerCone, option.value, { isHeal: true });
                           playerHealth += option.value;
                           break;
                       case 'critChance': playerStats.critChance = Math.min(0.75, playerStats.critChance + option.value); break;
@@ -2024,11 +2617,18 @@
                   document.getElementById('level-up-overlay').classList.add('visible');
               }
 
-                      function resetGame() {
+              function resetGame() {
+                  Debug.init();
+                  ErrorWatcher.reset();
+                  LogBuffer.reset();
                   clock.start();
                   // Cancel current animation loop
                   if (animationId) {
                       cancelAnimationFrame(animationId);
+                  }
+                  // Clear any existing debug interval
+                  if (debugInterval) {
+                      clearInterval(debugInterval);
                   }
 
                   score = 0;
@@ -2038,6 +2638,27 @@
                   experienceToNextLevel = 5;
                   document.getElementById('level').textContent = level;
                   updateExperienceBar();
+
+                  // Clear and re-initialize pools
+                  if (objectPools.blasterShots) objectPools.blasterShots.dispose();
+                  if (objectPools.enemyProjectiles) objectPools.enemyProjectiles.dispose();
+
+                  objectPools.blasterShots = new ObjectPool(() => {
+                      const blasterGeometry = new THREE.SphereGeometry(1.5, 8, 8);
+                      const blasterMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000, emissive: 0xff0000, emissiveIntensity: 5, metalness: 0.2, roughness: 0.8 });
+                      const blaster = new THREE.Mesh(blasterGeometry, blasterMaterial);
+                      return { mesh: blaster, active: false, hitEnemies: [] };
+                  }, MAX_PLAYER_SHOTS);
+
+                  objectPools.enemyProjectiles = new ObjectPool(() => {
+                      const projectileGeometry = new THREE.SphereGeometry(1, 8, 8);
+                      const projectileMaterial = new THREE.MeshBasicMaterial({ color: 0xff00ff });
+                      const projectile = new THREE.Mesh(projectileGeometry, projectileMaterial);
+                      return { mesh: projectile, active: false };
+                  }, MAX_ENEMY_SHOTS);
+
+                  // Reset spatial grid
+                  spatialGrid.clear();
 
                   // Hide level up popup if it's open
                   if (isGamePaused) hideLevelUpPopup();
@@ -2088,10 +2709,13 @@
                   playerHealth = playerStats.maxHealth;
                   healthBarElement.style.width = '100%';
 
+                  healthBarShakeUntil = 0;
                   isGameOver = false;
                   isPlayerHit = false;
                   hitAnimationTime = 0;
                   convertingGroup = null;
+                  accumulatedRegen = 0;
+                  lastRegenNumberTime = 0;
 
                   // Reset player position
                   playerCone.position.set(0, 3, 5);
@@ -2108,30 +2732,44 @@
 
                   // Remove all enemies
                   for (const enemy of enemies) {
+                      // This is a hard reset. We dispose what we can, but avoid disposing
+                      // geometry that might be shared with a skeleton that is also being cleared.
+                      // The gameplay loop handles per-instance disposal correctly. This is a fallback.
+                      if (enemy.wireframe) {
+                          enemy.wireframe.geometry.dispose();
+                          enemy.wireframe.material.dispose();
+                      }
+                      if (enemy.mesh.material) enemy.mesh.material.dispose();
                       scene.remove(enemy.mesh);
                   }
                   enemies.length = 0;
 
                   // Remove all blaster shots
                   for (const shot of blasterShots) {
-                      scene.remove(shot.blaster);
+                      // These are from a pool, which will be disposed, but let's be safe
+                      scene.remove(shot.mesh);
                   }
                   blasterShots.length = 0;
 
                   // Remove all skeletons
                   for (const skeleton of skeletons) {
+                      if (skeleton.mesh.material) skeleton.mesh.material.dispose();
                       scene.remove(skeleton.mesh);
                   }
                   skeletons.length = 0;
 
                   // Remove all coins
                   for (const coin of coins) {
+                      // Coin material is a clone, so it should be disposed
+                      if (coin.mesh.material) coin.mesh.material.dispose();
                       scene.remove(coin.mesh);
                   }
                   coins.length = 0;
 
                   // Remove all gems
                   for (const gem of gems) {
+                      // Gem geometry is shared, but material is unique
+                      if (gem.mesh.material) gem.mesh.material.dispose();
                       scene.remove(gem.mesh);
                   }
                   gems.length = 0;
@@ -2142,8 +2780,24 @@
                   }
                   enemyProjectiles.length = 0;
 
+                  for (const projectile of enemyProjectiles) {
+                      scene.remove(projectile.mesh);
+                  }
+                  enemyProjectiles.length = 0;
+
+                  // Remove all temporary effects
+                  for (const effect of temporaryEffects) {
+                      scene.remove(effect.mesh);
+                      if (effect.mesh.geometry) effect.mesh.geometry.dispose();
+                      if (effect.mesh.material) effect.mesh.material.dispose();
+                  }
+                  temporaryEffects.length = 0;
+
                   // Remove all octahedrons
                   for (const group of octahedronGroups) {
+                      if (group.octahedron.material) group.octahedron.material.dispose();
+                      if (group.ring.geometry) group.ring.geometry.dispose();
+                      if (group.ring.material) group.ring.material.dispose();
                       scene.remove(group.octahedron);
                       scene.remove(group.ring);
                       scene.remove(group.light);
@@ -2176,7 +2830,7 @@
               resetButton.addEventListener('click', resetGame);
 
               // Start the game
-              animate();
+              resetGame();
     </script>
   </body>
 </html>
