@@ -675,7 +675,8 @@
                       const frameTimeMs = (avgDelta * 1000).toFixed(0);
                       const mem = renderer.info.memory;
                       const renderInfo = renderer.info.render;
-                      const convertingState = convertingGroup ? convertingGroup.state : 'none';
+                      const convertingCount = relics.filter(r => r.state === 'lowering' || r.state === 'converting').length;
+                      const convertingState = convertingCount > 0 ? `${convertingCount} converting` : 'none';
                       const perfResults = this.perf.getResults();
                       const output = `
 [DEBUG] Time: ${Math.floor(currentTime)}s | FPS: ${fps} | FrameTime: ${frameTimeMs}ms
@@ -693,7 +694,8 @@
                       const currentTime = clock.getElapsedTime();
                       const mem = renderer.info.memory;
                       const renderInfo = renderer.info.render;
-                      const convertingState = convertingGroup ? convertingGroup.state : 'none';
+                      const convertingCount = relics.filter(r => r.state === 'lowering' || r.state === 'converting').length;
+                      const convertingState = convertingCount > 0 ? `${convertingCount} converting` : 'none';
                       const output = `
 [${prefix}] Time: ${Math.floor(currentTime)}s
   SceneChildren: ${scene.children.length} | Geom=${mem.geometries}, Tex=${mem.textures} | DrawCalls=${renderInfo.calls}
@@ -1947,9 +1949,6 @@
                   relics.splice(index, 1);
               }
 
-              let convertingGroup = null;
-              let debugInterval = null;
-
               // Animation loop
               function animate() {
                   animationId = requestAnimationFrame(animate);
@@ -2543,49 +2542,27 @@
                   Debug.perf.end('update_blaster_shots');
 
 
-                  Debug.perf.start('update_relics_state');
-                  // Relic interaction
-                  if (convertingGroup) {
-                      const distance = playerCone.position.distanceTo(convertingGroup.ring.position);
-                      if ((!keyState['Space'] || distance > 40) && convertingGroup.state !== 'active') { // 40 is a bit more than the trigger distance of 35
-                          if (convertingGroup.state === 'lowering' || convertingGroup.state === 'converting') {
-                              convertingGroup.loweringSpeed = 0; // Reset acceleration speed
-                              convertingGroup.state = 'returning';
-                          }
-                          convertingGroup = null;
-                      }
-                  } else {
-                      let closestIdleGroup = null;
-                      let minDistance = Infinity;
-  
-                      for (const group of relics) {
-                          if (group.state === 'idle' || group.state === 'returning') {
-                              const distance = playerCone.position.distanceTo(group.ring.position);
-                              if (distance < 35 && distance < minDistance) {
-                                  minDistance = distance;
-                                  closestIdleGroup = group;
+                  Debug.perf.start('update_relics_state');                  
+                  // Relic interaction - now automatic based on proximity
+                  spacebarSymbol.style.display = 'none'; // Spacebar no longer used for relics
+                  spacebarSymbol.classList.remove('spacebar-active');
+
+                  for (const group of relics) {
+                      const distance = playerCone.position.distanceTo(group.ring.position);
+
+                      if (group.state === 'idle' || group.state === 'returning') {
+                          if (distance < 35) { // Player is close enough to start converting
+                              if (group.state !== 'lowering') {
+                                  group.state = 'lowering';
+                                  group.loweringSpeed = 0.2; // Start with a base speed
                               }
                           }
-                      }
-  
-                      if (closestIdleGroup) {
-                          spacebarSymbol.style.display = 'block';
-                          if (keyState['Space']) {
-                              convertingGroup = closestIdleGroup;
-                              if (convertingGroup.state !== 'lowering') {
-                                  convertingGroup.state = 'lowering';
-                                  convertingGroup.loweringSpeed = 0.2; // Start with a base speed
-                              }
+                      } else if (group.state === 'lowering' || group.state === 'converting') {
+                          if (distance > 40) { // Player moved away
+                              group.loweringSpeed = 0; // Reset acceleration speed
+                              group.state = 'returning';
                           }
-                      } else {
-                          spacebarSymbol.style.display = 'none';
                       }
-                  }
-  
-                  if(convertingGroup) {
-                      spacebarSymbol.classList.add('spacebar-active');
-                  } else {
-                      spacebarSymbol.classList.remove('spacebar-active');
                   }
   
                   // Update relic states
@@ -2622,8 +2599,6 @@
                                 if (group.type === 'vacuum') {
                                     group.gravityEffect = createGravityVortex(group.relic, 200, relicInfo.vacuum.range * 0.8, 0x0000ff, true);
                                 }
-
-                                convertingGroup = null;
 
                                 // ✅ Temporary flash sphere cue
                                 const flashGeometry = new THREE.SphereGeometry(group.radius * 1.5, 16, 16);
@@ -3193,11 +3168,6 @@
                   if (animationId) {
                       cancelAnimationFrame(animationId);
                   }
-                  // Clear any existing debug interval
-                  if (debugInterval) {
-                      clearInterval(debugInterval);
-                  }
-
                   score = 0;
                   scoreElement.textContent = score;
                   level = 1;
@@ -3315,7 +3285,6 @@
                   isGameOver = false;
                   isPlayerHit = false;
                   hitAnimationTime = 0;
-                  convertingGroup = null;
                   accumulatedRegen = 0;
                   playerBuffs = {};
                   playerIsBoosted = false;
